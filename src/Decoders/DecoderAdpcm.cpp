@@ -89,9 +89,51 @@ s16 DecoderAdpcm::decodeNibble(uint8_t nibble, AdpcmState& state) {
 uint32_t DecoderAdpcm::decode(s16* buf, uint32_t maxSamples) {
     if (!fs_ || (status_ != Status::Ready && status_ != Status::Playing)) return 0;
     status_ = Status::Playing;
-    if (blocksRead_ >= totalBlocks_) { status_ = Status::Closed; return 0; }
 
-    /* Читаем один блок */
+    uint32_t totalOut = 0;
+
+    /* ── Cначала отдаём остаток от предыдущего блока ── */
+    if (blockDecPos_ < blockDecLen_) {
+        uint32_t avail = blockDecLen_ - blockDecPos_;
+        uint32_t n = std::min(avail, maxSamples);
+        std::memcpy(buf, blockDecBuf_ + blockDecPos_, n * sizeof(s16));
+        blockDecPos_ += n;
+        totalOut += n;
+        if (blockDecPos_ >= blockDecLen_)
+            blockDecLen_ = blockDecPos_ = 0;
+    }
+
+    /* ── Декодируем следующие блоки, пока не заполним буфер ── */
+    while (totalOut < maxSamples) {
+        if (blocksRead_ >= totalBlocks_) {
+            if (totalOut == 0) status_ = Status::Closed;
+            break;
+        }
+
+        uint32_t blockSamples = decodeOneBlock_();
+        if (blockSamples == 0) {
+            if (totalOut == 0) status_ = Status::Closed;
+            break;
+        }
+
+        uint32_t space = maxSamples - totalOut;
+        uint32_t n = std::min(blockSamples, space);
+        std::memcpy(buf + totalOut, blockDecBuf_, n * sizeof(s16));
+        totalOut += n;
+
+        if (n < blockSamples) {
+            /* Остаток сохраняем для следующего вызова */
+            blockDecPos_ = n;
+            blockDecLen_ = blockSamples;
+            break;
+        }
+    }
+
+    return totalOut;
+}
+
+uint32_t DecoderAdpcm::decodeOneBlock_() {
+    /* Читаем один блок из файла */
     uint8_t blockBuf[4096];
     uint8_t* block = blockBuf;
     bool alloc = false;
@@ -100,12 +142,10 @@ uint32_t DecoderAdpcm::decode(s16* buf, uint32_t maxSamples) {
     size_t rd = fs_->read(block, blockAlign_);
     if (rd < blockAlign_) {
         if (alloc) delete[] block;
-        status_ = Status::Closed;
         return 0;
     }
     blocksRead_++;
 
-    /* Декодируем — поддерживаем только моно или stereo->mono */
     uint32_t outSamples = 0;
     AdpcmState states[2];
 
@@ -119,9 +159,9 @@ uint32_t DecoderAdpcm::decode(s16* buf, uint32_t maxSamples) {
 
     /* Первый сэмпл — predictor из заголовка */
     if (channels_ == 1) {
-        buf[outSamples++] = states[0].predictor;
+        blockDecBuf_[outSamples++] = states[0].predictor;
     } else {
-        buf[outSamples++] = (s16)(((int32_t)states[0].predictor + states[1].predictor) / 2);
+        blockDecBuf_[outSamples++] = (s16)(((int32_t)states[0].predictor + states[1].predictor) / 2);
     }
 
     /* Данные nibbles */
@@ -129,17 +169,16 @@ uint32_t DecoderAdpcm::decode(s16* buf, uint32_t maxSamples) {
     uint32_t dataBytes = blockAlign_ - dataStart;
 
     if (channels_ == 1) {
-        for (uint32_t i = 0; i < dataBytes && outSamples < maxSamples; ++i) {
+        for (uint32_t i = 0; i < dataBytes && outSamples < kMaxBlockSamples; ++i) {
             uint8_t byte = block[dataStart + i];
-            buf[outSamples++] = decodeNibble(byte & 0x0F, states[0]);
-            if (outSamples < maxSamples)
-                buf[outSamples++] = decodeNibble((byte >> 4) & 0x0F, states[0]);
+            blockDecBuf_[outSamples++] = decodeNibble(byte & 0x0F, states[0]);
+            if (outSamples < kMaxBlockSamples)
+                blockDecBuf_[outSamples++] = decodeNibble((byte >> 4) & 0x0F, states[0]);
         }
     } else {
         /* Stereo: interleaved 4-byte chunks per channel */
         uint32_t pos_ = dataStart;
-        while (pos_ + 8 <= blockAlign_ && outSamples < maxSamples) {
-            /* 4 bytes for ch0, 4 bytes for ch1 */
+        while (pos_ + 8 <= blockAlign_ && outSamples < kMaxBlockSamples) {
             s16 ch0[8], ch1[8];
             int n0 = 0, n1 = 0;
             for (int b = 0; b < 4 && pos_ < blockAlign_; ++b, ++pos_) {
@@ -153,8 +192,8 @@ uint32_t DecoderAdpcm::decode(s16* buf, uint32_t maxSamples) {
                 ch1[n1++] = decodeNibble((byte >> 4) & 0x0F, states[1]);
             }
             int pairs = std::min(n0, n1);
-            for (int j = 0; j < pairs && outSamples < maxSamples; ++j)
-                buf[outSamples++] = (s16)(((int32_t)ch0[j] + ch1[j]) / 2);
+            for (int j = 0; j < pairs && outSamples < kMaxBlockSamples; ++j)
+                blockDecBuf_[outSamples++] = (s16)(((int32_t)ch0[j] + ch1[j]) / 2);
         }
     }
 
@@ -168,6 +207,7 @@ void DecoderAdpcm::seek(uint32_t sec) {
     uint32_t targetBlock = targetSample / samplesPerBlock_;
     if (targetBlock >= totalBlocks_) targetBlock = totalBlocks_ > 0 ? totalBlocks_ - 1 : 0;
     blocksRead_ = targetBlock;
+    blockDecLen_ = blockDecPos_ = 0;  /* сброс буфера остатка */
     fs_->seek(dataOffset_ + targetBlock * blockAlign_);
 }
 
@@ -183,6 +223,7 @@ uint32_t DecoderAdpcm::duration() const {
 
 void DecoderAdpcm::close() {
     fs_ = nullptr; status_ = Status::Closed; blocksRead_ = 0;
+    blockDecLen_ = blockDecPos_ = 0;
 }
 
 } // namespace ae2

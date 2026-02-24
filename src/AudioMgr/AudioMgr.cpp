@@ -251,11 +251,7 @@ void AudioMgr::processCommands_() {
             fs_->close();
             playerState_ = PlayerState::Stopped;
             sources_[(int)SrcId::Player].wantPlay = false;
-            if (currentSrc_ == SrcId::Player) {
-                AudioHw::instance().flush(true);
-                currentSrc_ = SrcId::Disabled;
-                currentSrcAtomic_ = SrcId::Disabled;
-            }
+            /* routerUpdate_() ниже вызовет switchSource_(Disabled) → amp off + DMA stop */
             break;
 
         case Cmd::AddFile:
@@ -312,11 +308,7 @@ void AudioMgr::processCommands_() {
             if (idx < kMaxSources) {
                 sources_[idx].wantPlay = false;
                 sources_[idx].active = false;
-                if (currentSrc_ == (SrcId)idx) {
-                    AudioHw::instance().flush(true);
-                    currentSrc_ = SrcId::Disabled;
-                    currentSrcAtomic_ = SrcId::Disabled;
-                }
+                /* routerUpdate_() обработает переключение */
             }
         } break;
 
@@ -388,10 +380,13 @@ void AudioMgr::switchSource_(SrcId newId) {
     currentSrcAtomic_ = newId;
 
     if (newId == SrcId::Disabled) {
-        /* Явно выключаем усилитель при переходе в Disabled */
+        /* Останавливаем аудио-ядро (DMA + таймер), GPIO → analog — нет шума */
         AudioHw::instance().ampEnable(false);
-        AE_LOGD("amp OFF (disabled)");
+        AudioHw::instance().stop();
+        AE_LOGD("audio HW stopped, amp OFF");
     } else {
+        /* Запускаем ядро если было остановлено (idempotent) */
+        AudioHw::instance().start();
         sources_[(int)newId].active = true;
         /* Включаем усилитель если новый источник выводит на FrontSpeaker */
         if (sources_[(int)newId].output == Output::FrontSpeaker) {

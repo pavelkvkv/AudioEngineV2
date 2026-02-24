@@ -98,6 +98,19 @@ uint32_t DecoderMp3::decode(s16* buf, uint32_t maxSamples) {
     status_ = Status::Playing;
 
     uint32_t totalOut = 0;
+
+    /* ── Сначала отдаём остаток от предыдущего фрейма ── */
+    if (leftoverLen_ > leftoverPos_) {
+        uint32_t avail = leftoverLen_ - leftoverPos_;
+        uint32_t n = std::min(avail, maxSamples);
+        std::memcpy(buf, leftover_ + leftoverPos_, n * sizeof(s16));
+        leftoverPos_ += n;
+        totalOut += n;
+        totalSamplesDecoded_ += n;
+        if (leftoverPos_ >= leftoverLen_)
+            leftoverLen_ = leftoverPos_ = 0;
+    }
+
     /* Helix декодирует до 1152 stereo сэмплов = 2304 s16 значений на фрейм */
     s16 pcm[MAX_NSAMP * MAX_NCHAN * MAX_NGRAN];  /* 576*2*2 = 2304 */
 
@@ -120,11 +133,26 @@ uint32_t DecoderMp3::decode(s16* buf, uint32_t maxSamples) {
         if (info.samprate > 0) sampleRate_ = (uint32_t)info.samprate;
         channels_ = (uint32_t)info.nChans;
 
-        /* Конвертируем в моно: Helix даёт interleaved stereo */
         uint32_t monoSamples = (uint32_t)(totalSamps / info.nChans);
         uint32_t space = maxSamples - totalOut;
-        if (monoSamples > space) monoSamples = space;
 
+        if (monoSamples > space) {
+            /* Фрейм не помещается целиком — даунмикс в leftover_, вывод сколько есть места */
+            if (info.nChans == 2) {
+                for (uint32_t i = 0; i < monoSamples; ++i)
+                    leftover_[i] = (s16)(((int32_t)pcm[i*2] + pcm[i*2+1]) / 2);
+            } else {
+                std::memcpy(leftover_, pcm, monoSamples * sizeof(s16));
+            }
+            std::memcpy(buf + totalOut, leftover_, space * sizeof(s16));
+            totalOut += space;
+            totalSamplesDecoded_ += space;
+            leftoverPos_ = space;
+            leftoverLen_ = monoSamples;
+            break;
+        }
+
+        /* Весь фрейм помещается */
         if (info.nChans == 2) {
             for (uint32_t i = 0; i < monoSamples; ++i)
                 buf[totalOut + i] = (s16)(((int32_t)pcm[i*2] + pcm[i*2+1]) / 2);
@@ -150,6 +178,7 @@ void DecoderMp3::seek(uint32_t sec) {
         fs_->seek(0);
     }
     inBufLen_ = inBufPos_ = 0;
+    leftoverLen_ = leftoverPos_ = 0;
     /* Helix не имеет mp3dec_init; пересоздаём декодер для сброса состояния */
     if (hDec_) { MP3FreeDecoder(hDec_); }
     hDec_ = MP3InitDecoder();
@@ -170,6 +199,7 @@ void DecoderMp3::close() {
     fs_ = nullptr;
     status_ = Status::Closed;
     inBufLen_ = inBufPos_ = 0;
+    leftoverLen_ = leftoverPos_ = 0;
     totalSamplesDecoded_ = 0;
 }
 

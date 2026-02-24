@@ -36,6 +36,12 @@ private:
     uint32_t duration_    = 0;
     uint64_t totalSamplesDecoded_ = 0;
 
+    /// Буфер остатка фрейма (макс. 1152 mono сэмплов для MPEG1 Layer3)
+    static constexpr uint32_t kMaxFrameMono = 1152;
+    s16 leftover_[kMaxFrameMono]{};
+    uint32_t leftoverLen_ = 0;
+    uint32_t leftoverPos_ = 0;
+
     bool refillInput_();
     int  findSyncAndDecode_(s16* pcm, MP3FrameInfo& info);
 };

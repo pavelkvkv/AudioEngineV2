@@ -24,8 +24,15 @@ private:
     uint32_t blocksRead_      = 0;
     uint32_t totalBlocks_     = 0;
 
+    /// Внутренний буфер декодированного блока (для порционной выдачи)
+    static constexpr uint32_t kMaxBlockSamples = 8192;
+    s16 blockDecBuf_[kMaxBlockSamples]{};
+    uint32_t blockDecLen_ = 0;  ///< Всего декодировано сэмплов в текущем блоке
+    uint32_t blockDecPos_ = 0;  ///< Текущая позиция чтения из буфера
+
     struct AdpcmState { s16 predictor; uint8_t stepIndex; };
     static s16 decodeNibble(uint8_t nibble, AdpcmState& state);
+    uint32_t decodeOneBlock_();
 };
 
 } // namespace ae2
