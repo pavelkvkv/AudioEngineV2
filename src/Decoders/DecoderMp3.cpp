@@ -1,4 +1,8 @@
 /// @file DecoderMp3.cpp
+/// @brief MP3-декодер на базе Helix fixed-point decoder.
+///
+/// Helix оптимизирован для ARM Cortex-M: fixed-point, ~6KB RAM, быстрые
+/// 32-bit multiplies через smull. Значительно быстрее minimp3 на Cortex-M4.
 #include "DecoderMp3.hpp"
 #include "FsAdapter/FsAdapter.hpp"
 #include "Mp3Duration/Mp3Duration.hpp"
@@ -10,7 +14,10 @@ namespace ae2 {
 bool DecoderMp3::open(FsAdapter& fs) {
     close();
     fs_ = &fs;
-    mp3dec_init(&mp3d_);
+
+    hDec_ = MP3InitDecoder();
+    if (!hDec_) return false;
+
     inBufLen_ = inBufPos_ = 0;
     totalSamplesDecoded_ = 0;
 
@@ -20,7 +27,7 @@ bool DecoderMp3::open(FsAdapter& fs) {
     sampleRate_ = (dur.sampleRate > 0) ? dur.sampleRate : 44100;
     channels_   = (dur.channels > 0) ? dur.channels : 2;
 
-    /* Seek к началу аудиоданных (после ID3v2) */
+    /* Пропуск ID3v2 тега */
     fs.seek(0);
     uint8_t id3[10];
     if (fs.read(id3, 10) >= 10 && id3[0]=='I' && id3[1]=='D' && id3[2]=='3') {
@@ -52,39 +59,73 @@ bool DecoderMp3::refillInput_() {
     return inBufLen_ > 0;
 }
 
+int DecoderMp3::findSyncAndDecode_(s16* pcm, MP3FrameInfo& info) {
+    /* Ищем sync word в доступных данных */
+    for (;;) {
+        int avail = (int)(inBufLen_ - inBufPos_);
+        if (avail < 4) return -1;  /* нужно больше данных */
+
+        int offset = MP3FindSyncWord(inBuf_ + inBufPos_, avail);
+        if (offset < 0) {
+            /* sync не найден — весь буфер мусор, сдвигаем */
+            inBufPos_ = inBufLen_;
+            return -1;
+        }
+        inBufPos_ += (uint32_t)offset;
+
+        /* Декодируем фрейм */
+        unsigned char* ptr = inBuf_ + inBufPos_;
+        int bytesLeft = (int)(inBufLen_ - inBufPos_);
+        int err = MP3Decode(hDec_, &ptr, &bytesLeft, pcm, 0);
+
+        /* Обновляем позицию (MP3Decode двигает ptr) */
+        inBufPos_ = inBufLen_ - (uint32_t)bytesLeft;
+
+        if (err == ERR_MP3_NONE) {
+            MP3GetLastFrameInfo(hDec_, &info);
+            return info.outputSamps;  /* total samples (channels * samplesPerCh) */
+        }
+        if (err == ERR_MP3_INDATA_UNDERFLOW || err == ERR_MP3_MAINDATA_UNDERFLOW) {
+            return -1;  /* нужно больше данных */
+        }
+        /* Другие ошибки — пропускаем байт и пробуем дальше */
+        if (inBufPos_ < inBufLen_) inBufPos_++;
+    }
+}
+
 uint32_t DecoderMp3::decode(s16* buf, uint32_t maxSamples) {
-    if (!fs_ || (status_ != Status::Ready && status_ != Status::Playing)) return 0;
+    if (!hDec_ || !fs_ || (status_ != Status::Ready && status_ != Status::Playing)) return 0;
     status_ = Status::Playing;
 
     uint32_t totalOut = 0;
-    s16 pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    /* Helix декодирует до 1152 stereo сэмплов = 2304 s16 значений на фрейм */
+    s16 pcm[MAX_NSAMP * MAX_NCHAN * MAX_NGRAN];  /* 576*2*2 = 2304 */
 
     while (totalOut < maxSamples) {
-        if (inBufLen_ - inBufPos_ < 1024) {
+        if (inBufLen_ - inBufPos_ < MAINBUF_SIZE) {
             if (!refillInput_()) break;
             if (inBufLen_ == 0) break;
         }
 
-        mp3dec_frame_info_t info;
-        int samples = mp3dec_decode_frame(&mp3d_,
-            inBuf_ + inBufPos_, (int)(inBufLen_ - inBufPos_),
-            pcm, &info);
+        MP3FrameInfo info{};
+        int totalSamps = findSyncAndDecode_(pcm, info);
+        if (totalSamps <= 0) {
+            /* Попробуем дочитать */
+            if (!refillInput_() || inBufLen_ == 0) break;
+            totalSamps = findSyncAndDecode_(pcm, info);
+            if (totalSamps <= 0) break;
+        }
 
-        if (info.frame_bytes == 0) break; /* no more data */
-        inBufPos_ += (uint32_t)info.frame_bytes;
+        /* Обновляем параметры из фактического фрейма */
+        if (info.samprate > 0) sampleRate_ = (uint32_t)info.samprate;
+        channels_ = (uint32_t)info.nChans;
 
-        if (samples <= 0) continue;
-
-        /* Update sample rate from actual frame */
-        if (info.hz > 0) sampleRate_ = (uint32_t)info.hz;
-        channels_ = (uint32_t)info.channels;
-
-        /* Convert to mono */
-        uint32_t monoSamples = (uint32_t)samples;
+        /* Конвертируем в моно: Helix даёт interleaved stereo */
+        uint32_t monoSamples = (uint32_t)(totalSamps / info.nChans);
         uint32_t space = maxSamples - totalOut;
         if (monoSamples > space) monoSamples = space;
 
-        if (info.channels == 2) {
+        if (info.nChans == 2) {
             for (uint32_t i = 0; i < monoSamples; ++i)
                 buf[totalOut + i] = (s16)(((int32_t)pcm[i*2] + pcm[i*2+1]) / 2);
         } else {
@@ -100,7 +141,7 @@ uint32_t DecoderMp3::decode(s16* buf, uint32_t maxSamples) {
 
 void DecoderMp3::seek(uint32_t sec) {
     if (!fs_) return;
-    /* Грубый seek: оценка по среднему битрейту */
+    /* Грубый seek по среднему битрейту */
     uint32_t fileSize = fs_->size();
     if (duration_ > 0) {
         uint32_t bytePos = (uint32_t)((uint64_t)fileSize * sec / duration_);
@@ -109,7 +150,9 @@ void DecoderMp3::seek(uint32_t sec) {
         fs_->seek(0);
     }
     inBufLen_ = inBufPos_ = 0;
-    mp3dec_init(&mp3d_);
+    /* Helix не имеет mp3dec_init; пересоздаём декодер для сброса состояния */
+    if (hDec_) { MP3FreeDecoder(hDec_); }
+    hDec_ = MP3InitDecoder();
     totalSamplesDecoded_ = (uint64_t)sec * sampleRate_;
 }
 
@@ -120,6 +163,10 @@ uint32_t DecoderMp3::position() const {
 uint32_t DecoderMp3::duration() const { return duration_; }
 
 void DecoderMp3::close() {
+    if (hDec_) {
+        MP3FreeDecoder(hDec_);
+        hDec_ = nullptr;
+    }
     fs_ = nullptr;
     status_ = Status::Closed;
     inBufLen_ = inBufPos_ = 0;

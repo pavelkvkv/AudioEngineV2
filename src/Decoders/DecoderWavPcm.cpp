@@ -71,6 +71,16 @@ uint32_t DecoderWavPcm::decode(s16* buf, uint32_t maxSamples) {
     if (framesToRead > framesLeft) framesToRead = framesLeft;
     if (framesToRead == 0) { status_ = Status::Closed; return 0; }
 
+    /* ── Быстрый путь: 16-bit mono — читаем напрямую в выходной буфер ── */
+    if (bitsPerSample_ == 16 && channels_ == 1) {
+        uint32_t rawBytes = framesToRead * 2;
+        size_t read = fs_->read(reinterpret_cast<uint8_t*>(buf), rawBytes);
+        if (read == 0) { status_ = Status::Closed; return 0; }
+        uint32_t actualFrames = (uint32_t)(read / 2);
+        bytesRead_ += actualFrames * 2;
+        return actualFrames;
+    }
+
     /* Читаем сырые данные */
     uint32_t rawBytes = framesToRead * bpf;
     /* Используем стек для небольших чанков, иначе временный буфер */
@@ -91,7 +101,17 @@ uint32_t DecoderWavPcm::decode(s16* buf, uint32_t maxSamples) {
     uint32_t actualFrames = (uint32_t)(read / bpf);
     bytesRead_ += (uint32_t)(actualFrames * bpf);
 
-    /* Конвертация в s16 mono */
+    /* ── Быстрый путь: 16-bit stereo → mono даунмикс ── */
+    if (bitsPerSample_ == 16 && channels_ == 2) {
+        const s16* samples = reinterpret_cast<const s16*>(raw);
+        for (uint32_t i = 0; i < actualFrames; ++i) {
+            buf[i] = (s16)(((int32_t)samples[i * 2] + (int32_t)samples[i * 2 + 1]) / 2);
+        }
+        if (allocated) delete[] raw;
+        return actualFrames;
+    }
+
+    /* ── Общий путь: любая комбинация bps/channels ── */
     for (uint32_t i = 0; i < actualFrames; ++i) {
         const uint8_t* frame = raw + i * bpf;
         int32_t monoSum = 0;

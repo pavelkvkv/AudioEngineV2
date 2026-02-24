@@ -1,14 +1,19 @@
 #pragma once
-#include "DecoderBase.hpp"
+/// @file DecoderMp3.hpp
+/// @brief MP3-декодер на базе Helix fixed-point decoder (RealNetworks).
+///
+/// Helix специально оптимизирован для ARM: fixed-point DSP, ~6KB RAM,
+/// в 2-5x быстрее minimp3 на Cortex-M4.
 
-#define MINIMP3_ONLY_MP3
-#define MINIMP3_NO_SIMD
-#include "minimp3.h"
+#include "DecoderBase.hpp"
+#include "mp3dec.h"   // Helix public API
 
 namespace ae2 {
 
 class DecoderMp3 final : public DecoderBase {
 public:
+    ~DecoderMp3() override { close(); }
+
     bool     open(FsAdapter& fs) override;
     uint32_t decode(s16* buf, uint32_t maxSamples) override;
     void     seek(uint32_t sec) override;
@@ -19,9 +24,9 @@ public:
 
 private:
     FsAdapter* fs_ = nullptr;
-    mp3dec_t mp3d_{};
+    HMP3Decoder hDec_ = nullptr;   ///< Helix decoder handle
 
-    static constexpr uint32_t kInBufSize = 16384;
+    static constexpr uint32_t kInBufSize = 4096;  ///< Входной буфер (Helix нужен меньший)
     uint8_t  inBuf_[kInBufSize]{};
     uint32_t inBufLen_  = 0;
     uint32_t inBufPos_  = 0;
@@ -32,6 +37,7 @@ private:
     uint64_t totalSamplesDecoded_ = 0;
 
     bool refillInput_();
+    int  findSyncAndDecode_(s16* pcm, MP3FrameInfo& info);
 };
 
 } // namespace ae2

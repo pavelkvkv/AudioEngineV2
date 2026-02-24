@@ -37,6 +37,14 @@
 #  define AE_LOGE(...) ((void)0)
 #endif
 
+/* Настройки громкости прошивки */
+#if defined(__has_include) && __has_include("settings.h")
+extern "C" {
+#  include "settings.h"
+}
+#  define HAS_SETTINGS 1
+#endif
+
 /* Fallback arm_scale_q15 if arm_math.h is not available */
 #if defined(__has_include)
 #  if __has_include("arm_math.h")
@@ -326,6 +334,21 @@ void AudioMgr::processCommands_() {
             break;
 
         case Cmd::VolumeChanged:
+#ifdef HAS_SETTINGS
+        {
+            /* Читаем громкость из настроек для текущего выхода плеера */
+            Output pout = sources_[(int)SrcId::Player].output;
+            uint8_t vol = 7; /* default passthrough */
+            if (pout == Output::FrontSpeaker)
+                vol = Settings.misc.volume_front;
+            else if (pout == Output::RearLineout)
+                vol = Settings.misc.volume_linout_opo;
+            if (vol > 10) vol = 10;
+            sources_[(int)SrcId::Player].volume = vol;
+            AE_LOGI("volume changed: out=%s vol=%u",
+                     (pout == Output::FrontSpeaker) ? "Front" : "Rear", vol);
+        }
+#endif
             break;
         }
     }
@@ -349,7 +372,13 @@ void AudioMgr::routerUpdate_() {
 
 void AudioMgr::switchSource_(SrcId newId) {
     AE_LOGI("source switch: %s -> %s", srcIdName_(currentSrc_), srcIdName_(newId));
+
+    /* При уходе со старого источника: отключить усилитель если был FrontSpeaker */
     if (currentSrc_ != SrcId::Disabled) {
+        if (sources_[(int)currentSrc_].output == Output::FrontSpeaker) {
+            AudioHw::instance().ampEnable(false);
+            AE_LOGD("amp OFF (prev source=%s)", srcIdName_(currentSrc_));
+        }
         sources_[(int)currentSrc_].active = false;
         if (currentSrc_ == SrcId::Player && playerState_ == PlayerState::Playing)
             playerState_ = PlayerState::Paused;
@@ -357,8 +386,18 @@ void AudioMgr::switchSource_(SrcId newId) {
     }
     currentSrc_ = newId;
     currentSrcAtomic_ = newId;
-    if (newId != SrcId::Disabled) {
+
+    if (newId == SrcId::Disabled) {
+        /* Явно выключаем усилитель при переходе в Disabled */
+        AudioHw::instance().ampEnable(false);
+        AE_LOGD("amp OFF (disabled)");
+    } else {
         sources_[(int)newId].active = true;
+        /* Включаем усилитель если новый источник выводит на FrontSpeaker */
+        if (sources_[(int)newId].output == Output::FrontSpeaker) {
+            AudioHw::instance().ampEnable(true);
+            AE_LOGD("amp ON (src=%s)", srcIdName_(newId));
+        }
         if (newId == SrcId::Player && playerState_ == PlayerState::Paused)
             playerState_ = PlayerState::Playing;
     }
@@ -408,6 +447,19 @@ void AudioMgr::startNextTrack_() {
     playerState_ = PlayerState::Playing;
     sources_[(int)SrcId::Player].wantPlay = true;
     sources_[(int)SrcId::Player].output = entry.output;
+
+    /* Обновляем громкость из настроек для нового выхода */
+#ifdef HAS_SETTINGS
+    {
+        uint8_t vol = 7;
+        if (entry.output == Output::FrontSpeaker)
+            vol = Settings.misc.volume_front;
+        else if (entry.output == Output::RearLineout)
+            vol = Settings.misc.volume_linout_opo;
+        if (vol > 10) vol = 10;
+        sources_[(int)SrcId::Player].volume = vol;
+    }
+#endif
 
     auto name = fs_->name();
     std::strncpy((char*)status_.filename, name.c_str(), sizeof(status_.filename) - 1);
