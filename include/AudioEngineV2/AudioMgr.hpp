@@ -155,6 +155,7 @@ private:
     void updateStatus_();
 
     bool initialized_ = false;
+    TickType_t lastProgressLog_ = 0;  ///< Тик последнего лога прогресса
 };
 
 } // namespace ae2

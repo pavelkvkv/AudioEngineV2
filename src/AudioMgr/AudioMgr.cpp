@@ -17,6 +17,26 @@
 #include <cstdio>
 #include <algorithm>
 
+/* Подключение профайлера (только в прошивке, не на хосте) */
+#if defined(__has_include) && __has_include("AudioProfiler.hpp")
+#  include "AudioProfiler.hpp"
+#endif
+
+/* Логирование платформы (только в прошивке) */
+#if defined(__has_include) && __has_include("log.h")
+#  define TAG "AudioMgr"
+#  include "log.h"
+#  define AE_LOGI(...) logI(__VA_ARGS__)
+#  define AE_LOGD(...) logD(__VA_ARGS__)
+#  define AE_LOGW(...) logW(__VA_ARGS__)
+#  define AE_LOGE(...) logE(__VA_ARGS__)
+#else
+#  define AE_LOGI(...) ((void)0)
+#  define AE_LOGD(...) ((void)0)
+#  define AE_LOGW(...) ((void)0)
+#  define AE_LOGE(...) ((void)0)
+#endif
+
 /* Fallback arm_scale_q15 if arm_math.h is not available */
 #if defined(__has_include)
 #  if __has_include("arm_math.h")
@@ -58,7 +78,7 @@ AudioMgr::AudioMgr() {
     resampler_ = new Resampler();
     cmdQueue_ = xQueueCreate(kCmdQueueDepth, sizeof(Cmd));
     AudioHw::instance().start();
-    xTaskCreate(taskEntry_, "AudioMgr", 4096, this, 5, &task_);
+    xTaskCreate(taskEntry_, "AudioMgr", 1024*6, this, 5, &task_);
     initialized_ = true;
 }
 
@@ -176,6 +196,19 @@ void AudioMgr::queueClear_() {
     queueHead_ = queueTail_ = queueCount_ = 0;
 }
 
+/* ═══ Helpers ═══ */
+
+static const char* srcIdName_(ae2::SrcId id) {
+    switch (id) {
+        case ae2::SrcId::Disabled:      return "Disabled";
+        case ae2::SrcId::Player:        return "Player";
+        case ae2::SrcId::AdcDirect:     return "AdcDirect";
+        case ae2::SrcId::FrontExternal: return "FrontExt";
+        case ae2::SrcId::Diag:          return "Diag";
+        default:                        return "?";
+    }
+}
+
 /* ═══ Process commands ═══ */
 
 void AudioMgr::processCommands_() {
@@ -184,20 +217,28 @@ void AudioMgr::processCommands_() {
         switch (cmd.type) {
         case Cmd::Play:
             if (playerState_ == PlayerState::Paused) {
+                AE_LOGI("cmd: play (resume)");
                 playerState_ = PlayerState::Playing;
                 sources_[(int)SrcId::Player].wantPlay = true;
             } else if (playerState_ == PlayerState::Stopped && queueCount_ > 0) {
+                AE_LOGI("cmd: play (start, queue=%lu)", (unsigned long)queueCount_);
                 sources_[(int)SrcId::Player].wantPlay = true;
                 startNextTrack_();
+            } else {
+                AE_LOGD("cmd: play ignored (state=%d, queue=%lu)",
+                        (int)playerState_, (unsigned long)queueCount_);
             }
             break;
 
         case Cmd::Pause:
-            if (playerState_ == PlayerState::Playing)
+            if (playerState_ == PlayerState::Playing) {
+                AE_LOGI("cmd: pause");
                 playerState_ = PlayerState::Paused;
+            }
             break;
 
         case Cmd::Stop:
+            AE_LOGI("cmd: stop");
             destroyDecoder(decoder_);
             fs_->close();
             playerState_ = PlayerState::Stopped;
@@ -210,14 +251,19 @@ void AudioMgr::processCommands_() {
             break;
 
         case Cmd::AddFile:
-            queuePush_(cmd.file.path, cmd.file.startSec, (Output)cmd.file.output);
-            if (playerState_ == PlayerState::Stopped) {
-                sources_[(int)SrcId::Player].wantPlay = true;
-                startNextTrack_();
+            if (queuePush_(cmd.file.path, cmd.file.startSec, (Output)cmd.file.output)) {
+                AE_LOGD("queue add: %s (q=%lu)", cmd.file.path, (unsigned long)queueCount_);
+                if (playerState_ == PlayerState::Stopped) {
+                    sources_[(int)SrcId::Player].wantPlay = true;
+                    startNextTrack_();
+                }
+            } else {
+                AE_LOGW("queue full, skipped: %s", cmd.file.path);
             }
             break;
 
         case Cmd::AddFileFront:
+            AE_LOGI("queue add front: %s", cmd.file.path);
             destroyDecoder(decoder_);
             fs_->close();
             queuePushFront_(cmd.file.path, cmd.file.startSec, (Output)cmd.file.output);
@@ -302,6 +348,7 @@ void AudioMgr::routerUpdate_() {
 }
 
 void AudioMgr::switchSource_(SrcId newId) {
+    AE_LOGI("source switch: %s -> %s", srcIdName_(currentSrc_), srcIdName_(newId));
     if (currentSrc_ != SrcId::Disabled) {
         sources_[(int)currentSrc_].active = false;
         if (currentSrc_ == SrcId::Player && playerState_ == PlayerState::Playing)
@@ -325,12 +372,14 @@ void AudioMgr::startNextTrack_() {
 
     QueueEntry entry;
     if (!queuePop_(entry)) {
+        AE_LOGD("queue empty, player stopped");
         playerState_ = PlayerState::Stopped;
         sources_[(int)SrcId::Player].wantPlay = false;
         return;
     }
 
     if (!fs_->open(std::string(entry.path))) {
+        AE_LOGW("open failed: %s", entry.path);
         startNextTrack_();
         return;
     }
@@ -342,10 +391,14 @@ void AudioMgr::startNextTrack_() {
         case CodecDetect::Type::WavAdpcm: emplaceDecoder<DecoderAdpcm>(decoderMem_, decoder_); break;
         case CodecDetect::Type::WavAlaw:  emplaceDecoder<DecoderAlaw>(decoderMem_, decoder_); break;
         case CodecDetect::Type::WavUlaw:  emplaceDecoder<DecoderUlaw>(decoderMem_, decoder_); break;
-        default: startNextTrack_(); return;
+        default:
+            AE_LOGW("unknown codec: %s", entry.path);
+            startNextTrack_();
+            return;
     }
 
     if (!decoder_->open(*fs_)) {
+        AE_LOGW("decoder open failed: %s", entry.path);
         destroyDecoder(decoder_);
         startNextTrack_();
         return;
@@ -359,6 +412,7 @@ void AudioMgr::startNextTrack_() {
     auto name = fs_->name();
     std::strncpy((char*)status_.filename, name.c_str(), sizeof(status_.filename) - 1);
     ((char*)status_.filename)[sizeof(status_.filename)-1] = '\0';
+    AE_LOGI("playing: %s (dur=%lu sec)", entry.path, (unsigned long)decoder_->duration());
 }
 
 /* ═══ Pipeline tick ═══ */
@@ -372,7 +426,9 @@ void AudioMgr::pipelineTick_() {
 
     if (currentSrc_ == SrcId::Player) {
         if (playerState_ != PlayerState::Playing || !decoder_) return;
+        { APROF_SCOPE(Decode);
         decoded = decoder_->decode(decodeBuf_, 1024);
+        }
         if (decoded == 0) { startNextTrack_(); return; }
         srcSampleRate = decoder_->sampleRate();
     } else {
@@ -386,8 +442,10 @@ void AudioMgr::pipelineTick_() {
     /* Volume */
     uint8_t volIdx = sources_[(int)currentSrc_].volume;
     if (volIdx < 7) {
+        APROF_BEGIN(Volume);
         int16_t scale = kVolumeTable[volIdx];
         arm_scale_q15(decodeBuf_, scale, 0, decodeBuf_, decoded);
+        APROF_END(Volume);
     }
 
     /* Resample + write */
@@ -396,11 +454,18 @@ void AudioMgr::pipelineTick_() {
     if (outLen == 0) return;
 
     auto wr = hw.acquireWrite(outLen, pdMS_TO_TICKS(100));
-    if (wr.cap1 + wr.cap2 == 0) return;
+    if (wr.cap1 + wr.cap2 == 0) {
+        AE_LOGW("acquireWrite timeout (AudioHw stall?)");
+        return;
+    }
 
     uint32_t toWrite = std::min(outLen, wr.cap1 + wr.cap2);
+    { APROF_SCOPE(Resample);
     resamp->process(decodeBuf_, decoded, wr.ptr1, wr.cap1, wr.ptr2, wr.cap2);
+    }
+    { APROF_SCOPE(Enqueue);
     hw.commitWrite(toWrite);
+    }
 }
 
 /* ═══ Status update ═══ */
@@ -428,6 +493,21 @@ void AudioMgr::taskEntry_(void* arg) { static_cast<AudioMgr*>(arg)->taskLoop_();
 void AudioMgr::taskLoop_() {
     for (;;) {
         processCommands_();
+
+        /* Прогресс воспроизведения — раз в секунду */
+        if (playerState_ == PlayerState::Playing && decoder_) {
+            TickType_t now = xTaskGetTickCount();
+            if ((now - lastProgressLog_) >= pdMS_TO_TICKS(1000)) {
+                lastProgressLog_ = now;
+                const auto& st = *(const PlayerStatus*)&status_;
+                AE_LOGI("progress: \"%s\" %lu/%lu sec (%u%%)",
+                        (const char*)status_.filename,
+                        (unsigned long)st.position,
+                        (unsigned long)st.duration,
+                        (unsigned)st.positionPercent);
+            }
+        }
+
         if (currentSrc_ == SrcId::Disabled) {
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
             continue;

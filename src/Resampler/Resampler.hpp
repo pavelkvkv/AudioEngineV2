@@ -23,8 +23,12 @@ public:
                      s16* dst2, uint32_t dst2Cap) const;
 
 private:
-    uint32_t inRate_  = 44100;
-    uint32_t outRate_ = 128000;
+    uint32_t inRate_    = 44100;
+    uint32_t outRate_   = 128000;
+    /** Шаг фазового аккумулятора в формате Q16:
+     *  phaseStep_ = (inRate << 16) / outRate.
+     *  Предвычисляется в setRates(), устраняет double из горячего пути. */
+    uint32_t phaseStep_ = 65536u;  /* 44100/44100 * 2^16 = 1.0 */
     Algorithm alg_ = Algorithm::Linear;
 };
 
