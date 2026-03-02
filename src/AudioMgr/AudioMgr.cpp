@@ -16,6 +16,8 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include "RegionAllocator.h"
+#include "TaskPriorities.h"
 
 /* Подключение профайлера (только в прошивке, не на хосте) */
 #if defined(__has_include) && __has_include("AudioProfiler.hpp")
@@ -86,7 +88,7 @@ AudioMgr::AudioMgr() {
     resampler_ = new Resampler();
     cmdQueue_ = xQueueCreate(kCmdQueueDepth, sizeof(Cmd));
     AudioHw::instance().start();
-    xTaskCreate(taskEntry_, "AudioMgr", 1024*6, this, 5, &task_);
+    xTaskCreateInRegion(RegionAlloc::Zone::HEAP_ZONE_FAST, taskEntry_, "AudioMgr", 1024*6, this, PRIO_TASK_AUDIO_MGR, &task_);
     initialized_ = true;
 }
 

@@ -41,7 +41,7 @@ public:
     /// Сколько свободного места.
     uint32_t freeSpace() const;
 
-    static constexpr uint32_t RingSize = 16384;
+    static constexpr uint32_t RingSize = 8192;
 
     // Не копируем
     AudioHw(const AudioHw&) = delete;

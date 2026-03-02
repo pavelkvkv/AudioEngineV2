@@ -24,8 +24,9 @@ private:
     uint32_t blocksRead_      = 0;
     uint32_t totalBlocks_     = 0;
 
-    /// Внутренний буфер декодированного блока (для порционной выдачи)
-    static constexpr uint32_t kMaxBlockSamples = 8192;
+    /// Внутренний буфер декодированного блока (для порционной выдачи).
+    /// Стандартный WAV IMA ADPCM: blockAlign 256-1024 → до ~2000 сэмплов.
+    static constexpr uint32_t kMaxBlockSamples = 2048;
     s16 blockDecBuf_[kMaxBlockSamples]{};
     uint32_t blockDecLen_ = 0;  ///< Всего декодировано сэмплов в текущем блоке
     uint32_t blockDecPos_ = 0;  ///< Текущая позиция чтения из буфера

@@ -1,6 +1,8 @@
 /// @file AudioHw.cpp
 #include "AudioHw.hpp"
 #include <algorithm>
+#include "RegionAllocator.h"
+#include "TaskPriorities.h"
 
 namespace ae2 {
 
@@ -24,7 +26,7 @@ void AudioHw::start() {
     readPos_.store(0, std::memory_order_relaxed);
     started_ = true;
     if (!drainTask_) {
-        xTaskCreate(drainEntry_, "AeHwDrain", 1024, this, 2, &drainTask_);
+        xTaskCreateInRegion(RegionAlloc::Zone::HEAP_ZONE_FAST, drainEntry_, "AeHwDrain", 1024, this, PRIO_TASK_AUDIO_HW_DRAIN, &drainTask_);
     }
 }
 

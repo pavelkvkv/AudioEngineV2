@@ -74,7 +74,7 @@ public:
         };
         Type type;
         union {
-            struct { char path[240]; uint32_t startSec; uint8_t output; } file;
+            struct { char path[128]; uint32_t startSec; uint8_t output; } file;
             struct { uint8_t srcId; } source;
             struct { uint8_t srcId; uint8_t vol; } volume;
             struct { uint32_t sec; } seek;
@@ -114,7 +114,7 @@ private:
     PlayerState playerState_ = PlayerState::Stopped;
 
     struct QueueEntry {
-        char     path[240]{};
+        char     path[128]{};
         uint32_t startSec = 0;
         Output   output   = Output::FrontSpeaker;
         bool     used     = false;
@@ -131,9 +131,9 @@ private:
     void queueClear_();
 
     /* ── Декодер ── */
-    alignas(16) uint8_t decoderMem_[80000]{};
+    alignas(16) uint8_t decoderMem_[8192]{};
     DecoderBase* decoder_  = nullptr;
-    uint8_t fsBuf_[8192]{};
+    uint8_t fsBuf_[4096]{};
     FsAdapter* fs_ = nullptr;
 
     /* ── Буферы пайплайна ── */

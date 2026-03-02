@@ -58,6 +58,7 @@ bool DecoderAdpcm::open(FsAdapter& fs) {
         if (gotFmt && gotData) break;
     }
     if (!gotFmt || !gotData || channels_ == 0 || blockAlign_ == 0) return false;
+    if (samplesPerBlock_ > kMaxBlockSamples) return false;
     totalBlocks_ = dataSize_ / blockAlign_;
     blocksRead_ = 0;
     fs.seek(dataOffset_);

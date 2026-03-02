@@ -32,7 +32,7 @@ protected:
     Status status_ = Status::Closed;
 };
 
-static constexpr size_t kMaxDecoderSize  = 80000;
+static constexpr size_t kMaxDecoderSize  = 8192;
 static constexpr size_t kMaxDecoderAlign = 16;
 
 template<typename T, typename... Args>
