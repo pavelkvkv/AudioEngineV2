@@ -2,6 +2,7 @@
 #include "FsAdapter.hpp"
 #include <algorithm>
 #include <cctype>
+#include <string_view>
 
 namespace ae2 {
 
@@ -16,11 +17,12 @@ FsAdapter::~FsAdapter() {
     if (ownBuf_) delete[] buf_;
 }
 
-bool FsAdapter::open(const std::string& path) {
+bool FsAdapter::open(const char* path) {
     close();
-    file_ = std::fopen(path.c_str(), "rb");
+    file_ = std::fopen(path, "rb");
     if (!file_) return false;
-    path_ = path;
+    std::strncpy(path_, path, kMaxPath - 1);
+    path_[kMaxPath - 1] = '\0';
     bufPos_ = bufLen_ = 0;
     fileOffset_ = 0;
     /* Определяем размер файла */
@@ -32,7 +34,7 @@ bool FsAdapter::open(const std::string& path) {
 
 void FsAdapter::close() {
     if (file_) { std::fclose(file_); file_ = nullptr; }
-    path_.clear();
+    path_[0] = '\0';
     bufPos_ = bufLen_ = 0;
     fileOffset_ = 0;
     fileSize_ = 0;
@@ -72,19 +74,23 @@ uint32_t FsAdapter::tell() const {
 
 uint32_t FsAdapter::size() const { return fileSize_; }
 
-std::string FsAdapter::name() const {
-    auto slash = path_.rfind('/');
-    if (slash == std::string::npos) slash = path_.rfind('\\');
-    return (slash == std::string::npos) ? path_ : path_.substr(slash + 1);
+std::string_view FsAdapter::name() const {
+    const char* slash = std::strrchr(path_, '/');
+    if (!slash) slash = std::strrchr(path_, '\\');
+    return slash ? (slash + 1) : path_;
 }
 
-std::string FsAdapter::extension() const {
+std::string_view FsAdapter::extension() const {
     auto n = name();
     auto dot = n.rfind('.');
-    if (dot == std::string::npos) return {};
-    std::string ext = n.substr(dot + 1);
-    for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
-    return ext;
+    if (dot == std::string_view::npos || dot == 0) { ext_[0] = '\0'; return {ext_, 0}; }
+    auto raw = n.substr(dot + 1);
+    size_t len = raw.size();
+    if (len >= sizeof(ext_)) len = sizeof(ext_) - 1;
+    for (size_t i = 0; i < len; ++i)
+        ext_[i] = (char)std::tolower((unsigned char)raw[i]);
+    ext_[len] = '\0';
+    return {ext_, len};
 }
 
 bool FsAdapter::refill_() {

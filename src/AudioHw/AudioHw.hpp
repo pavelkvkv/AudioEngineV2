@@ -23,6 +23,7 @@ public:
     void start();
     void stop();
     bool isStarted() const { return started_; }
+    void ampEnable(bool) {}  ///< Стаб для хоста (нет усилителя)
 
     /* ── Прямая запись ── */
     struct WriteRegion {

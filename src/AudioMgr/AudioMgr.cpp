@@ -16,12 +16,18 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <new>
 #include "RegionAllocator.h"
 #include "TaskPriorities.h"
 
 /* Подключение профайлера (только в прошивке, не на хосте) */
 #if defined(__has_include) && __has_include("AudioProfiler.hpp")
 #  include "AudioProfiler.hpp"
+#endif
+#ifndef APROF_SCOPE
+#  define APROF_SCOPE(name) ((void)0)
+#  define APROF_BEGIN(name) ((void)0)
+#  define APROF_END(name)   ((void)0)
 #endif
 
 /* Логирование платформы (только в прошивке) */
@@ -69,6 +75,9 @@ static inline void arm_scale_q15(const int16_t* src, int16_t scaleFract, int8_t 
 
 namespace ae2 {
 
+static_assert(sizeof(FsAdapter) <= 1152, "fsMem_ слишком мал для FsAdapter");
+static_assert(sizeof(Resampler) <= 32, "resamplerMem_ слишком мал для Resampler");
+
 /* ═══ Singleton ═══ */
 
 AudioMgr& AudioMgr::instance() {
@@ -84,9 +93,10 @@ AudioMgr::AudioMgr() {
     sources_[(int)SrcId::FrontExternal].priority = 1;
     sources_[(int)SrcId::Diag].priority     = 3;
 
-    fs_ = new FsAdapter(fsBuf_, sizeof(fsBuf_));
-    resampler_ = new Resampler();
-    cmdQueue_ = xQueueCreate(kCmdQueueDepth, sizeof(Cmd));
+    fs_ = new (fsMem_) FsAdapter(fsBuf_, sizeof(fsBuf_));
+    resampler_ = new (resamplerMem_) Resampler();
+    cmdQueue_ = xQueueCreateStatic(kCmdQueueDepth, sizeof(Cmd),
+                                     cmdQueueStorage_, &cmdQueueBuf_);
     AudioHw::instance().start();
     xTaskCreateInRegion(RegionAlloc::Zone::HEAP_ZONE_FAST, taskEntry_, "AudioMgr", 1024*6, this, PRIO_TASK_AUDIO_MGR, &task_);
     initialized_ = true;
@@ -414,7 +424,7 @@ void AudioMgr::startNextTrack_() {
         return;
     }
 
-    if (!fs_->open(std::string(entry.path))) {
+    if (!fs_->open(entry.path)) {
         AE_LOGW("open failed: %s", entry.path);
         startNextTrack_();
         return;
@@ -458,9 +468,13 @@ void AudioMgr::startNextTrack_() {
     }
 #endif
 
-    auto name = fs_->name();
-    std::strncpy((char*)status_.filename, name.c_str(), sizeof(status_.filename) - 1);
-    ((char*)status_.filename)[sizeof(status_.filename)-1] = '\0';
+    {
+        auto nm = fs_->name();
+        size_t len = nm.size();
+        if (len >= sizeof(status_.filename)) len = sizeof(status_.filename) - 1;
+        std::memcpy((char*)status_.filename, nm.data(), len);
+        ((char*)status_.filename)[len] = '\0';
+    }
     AE_LOGI("playing: %s (dur=%lu sec)", entry.path, (unsigned long)decoder_->duration());
 }
 

@@ -1,6 +1,7 @@
 /// @file Mp3Duration.cpp
 #include "Mp3Duration.hpp"
 #include "FsAdapter/FsAdapter.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace ae2 {

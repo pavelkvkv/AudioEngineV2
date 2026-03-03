@@ -433,6 +433,40 @@ static __inline Word64 SAR64(Word64 x, int n)
 	return (x >> n);
 }
 
+#elif defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+
+/* Generic C fallback для хостовой сборки (x86/x86_64) */
+typedef long long Word64;
+
+static __inline int MULSHIFT32(int x, int y)
+{
+	long long result = (long long)x * (long long)y;
+	return (int)(result >> 32);
+}
+
+static __inline int FASTABS(int x)
+{
+	int sign;
+	sign = x >> (sizeof(int) * 8 - 1);
+	x ^= sign;
+	x -= sign;
+	return x;
+}
+
+static __inline int CLZ(int x)
+{
+	if (!x) return (sizeof(int) * 8);
+	return __builtin_clz(x);
+}
+
+static __inline Word64 MADD64(Word64 sum, int a, int b)
+{
+	return sum + (Word64)a * (Word64)b;
+}
+
+static __inline Word64 SHL64(Word64 x, int n) { return (x << n); }
+static __inline Word64 SAR64(Word64 x, int n) { return (x >> n); }
+
 #else
 
 #error Unsupported platform in assembly.h

@@ -90,6 +90,8 @@ private:
 
     QueueHandle_t cmdQueue_ = nullptr;
     static constexpr uint32_t kCmdQueueDepth = 32;
+    StaticQueue_t cmdQueueBuf_{};
+    uint8_t cmdQueueStorage_[kCmdQueueDepth * sizeof(Cmd)]{};
 
     /* ── Таск ── */
     TaskHandle_t task_ = nullptr;
@@ -134,12 +136,14 @@ private:
     alignas(16) uint8_t decoderMem_[8192]{};
     DecoderBase* decoder_  = nullptr;
     uint8_t fsBuf_[4096]{};
+    alignas(8) uint8_t fsMem_[1152]{};  ///< placement-хранилище для FsAdapter
     FsAdapter* fs_ = nullptr;
 
     /* ── Буферы пайплайна ── */
     s16 decodeBuf_[2048]{};
 
     /* ── Ресемплер ── */
+    alignas(4) uint8_t resamplerMem_[32]{};  ///< placement-хранилище для Resampler
     void* resampler_ = nullptr;
 
     /* ── Процессинг ── */

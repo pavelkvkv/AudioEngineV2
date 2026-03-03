@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <string>
+#include <string_view>
 
 namespace ae2 {
 
@@ -20,7 +20,7 @@ public:
     FsAdapter(const FsAdapter&) = delete;
     FsAdapter& operator=(const FsAdapter&) = delete;
 
-    bool open(const std::string& path);
+    bool open(const char* path);
     void close();
 
     /// Прочитать len байт в dst.
@@ -34,12 +34,14 @@ public:
     /// Открыт ли файл.
     bool isOpen() const { return file_ != nullptr; }
     /// Путь к файлу.
-    const std::string& path() const { return path_; }
+    const char* path() const { return path_; }
 
-    /// Имя файла (без пути).
-    std::string name() const;
-    /// Расширение в нижнем регистре (без точки).
-    std::string extension() const;
+    /// Имя файла (без пути). Указывает внутрь path_.
+    std::string_view name() const;
+    /// Расширение в нижнем регистре (без точки). Указывает на ext_.
+    std::string_view extension() const;
+
+    static constexpr size_t kMaxPath = 256;
 
 private:
     bool refill_();
@@ -52,7 +54,8 @@ private:
     size_t bufLen_ = 0;
     uint32_t fileOffset_ = 0;  ///< смещение начала буфера в файле
     uint32_t fileSize_ = 0;
-    std::string path_;
+    char path_[kMaxPath]{};
+    mutable char ext_[16]{};  ///< кеш для extension()
 };
 
 } // namespace ae2
