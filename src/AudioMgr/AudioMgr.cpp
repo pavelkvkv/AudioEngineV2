@@ -13,6 +13,7 @@
 #include "Decoders/DecoderAlaw.hpp"
 #include "Decoders/DecoderUlaw.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
@@ -165,8 +166,8 @@ void AudioMgr::registerSource(SrcId id, uint8_t priority, ExternalFeed feed) {
 void AudioMgr::unregisterSource(SrcId id) {
     uint8_t idx = (uint8_t)id;
     if (idx >= kMaxSources) return;
-    sources_[idx].feed = {nullptr, nullptr};
-    sources_[idx].wantPlay = false;
+	sources_[idx].feed	   = {.feed = nullptr, .ctx = nullptr};
+	sources_[idx].wantPlay = false;
     sources_[idx].active = false;
 }
 
@@ -232,8 +233,8 @@ static const char* srcIdName_(ae2::SrcId id) {
 /* ═══ Process commands ═══ */
 
 void AudioMgr::processCommands_() {
-    Cmd cmd;
-    while (xQueueReceive(cmdQueue_, &cmd, 0) == pdPASS) {
+	Cmd cmd{};
+	while (xQueueReceive(cmdQueue_, &cmd, 0) == pdPASS) {
         switch (cmd.type) {
         case Cmd::Play:
             if (playerState_ == PlayerState::Paused) {
@@ -328,8 +329,8 @@ void AudioMgr::processCommands_() {
             uint8_t idx = cmd.volume.srcId;
             if (idx < kMaxSources) {
                 uint8_t v = cmd.volume.vol;
-                if (v > 10) v = 10;
-                sources_[idx].volume = v;
+				v					 = std::min<uint8_t>(v, 10);
+				sources_[idx].volume = v;
             }
         } break;
 
@@ -347,8 +348,8 @@ void AudioMgr::processCommands_() {
                 vol = Settings.misc.volume_front;
             else if (pout == Output::RearLineout)
                 vol = Settings.misc.volume_linout_opo;
-            if (vol > 10) vol = 10;
-            sources_[(int)SrcId::Player].volume = vol;
+			vol									= std::min<uint8_t>(vol, 10);
+			sources_[(int)SrcId::Player].volume = vol;
             AE_LOGI("volume changed: out=%s vol=%u",
                      (pout == Output::FrontSpeaker) ? "Front" : "Rear", vol);
         }
@@ -463,8 +464,8 @@ void AudioMgr::startNextTrack_() {
             vol = Settings.misc.volume_front;
         else if (entry.output == Output::RearLineout)
             vol = Settings.misc.volume_linout_opo;
-        if (vol > 10) vol = 10;
-        sources_[(int)SrcId::Player].volume = vol;
+		vol									= std::min<uint8_t>(vol, 10);
+		sources_[(int)SrcId::Player].volume = vol;
     }
 #endif
 

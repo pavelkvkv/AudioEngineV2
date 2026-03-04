@@ -8,10 +8,10 @@ public:
     bool     open(FsAdapter& fs) override;
     uint32_t decode(s16* buf, uint32_t maxSamples) override;
     void     seek(uint32_t sec) override;
-    uint32_t position() const override;
-    uint32_t duration() const override;
-    uint32_t sampleRate() const override { return sampleRate_; }
-    void     close() override;
+	[[nodiscard]] uint32_t position() const override;
+	[[nodiscard]] uint32_t duration() const override;
+	[[nodiscard]] uint32_t sampleRate() const override { return sampleRate_; }
+	void     close() override;
 
 private:
     FsAdapter* fs_ = nullptr;

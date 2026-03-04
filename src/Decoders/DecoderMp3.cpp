@@ -140,8 +140,8 @@ uint32_t DecoderMp3::decode(s16* buf, uint32_t maxSamples) {
             /* Фрейм не помещается целиком — даунмикс в leftover_, вывод сколько есть места */
             if (info.nChans == 2) {
                 for (uint32_t i = 0; i < monoSamples; ++i)
-                    leftover_[i] = (s16)(((int32_t)pcm[i*2] + pcm[i*2+1]) / 2);
-            } else {
+					leftover_[i] = (s16)(((int32_t)pcm[i * 2] + pcm[(i * 2) + 1]) / 2);
+			} else {
                 std::memcpy(leftover_, pcm, monoSamples * sizeof(s16));
             }
             std::memcpy(buf + totalOut, leftover_, space * sizeof(s16));
@@ -155,8 +155,8 @@ uint32_t DecoderMp3::decode(s16* buf, uint32_t maxSamples) {
         /* Весь фрейм помещается */
         if (info.nChans == 2) {
             for (uint32_t i = 0; i < monoSamples; ++i)
-                buf[totalOut + i] = (s16)(((int32_t)pcm[i*2] + pcm[i*2+1]) / 2);
-        } else {
+				buf[totalOut + i] = (s16)(((int32_t)pcm[i * 2] + pcm[(i * 2) + 1]) / 2);
+		} else {
             std::memcpy(buf + totalOut, pcm, monoSamples * sizeof(s16));
         }
         totalOut += monoSamples;

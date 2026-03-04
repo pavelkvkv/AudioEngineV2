@@ -55,12 +55,12 @@ public:
         bool     paused    = false;
         bool     fileReady = false;
     };
-    PlayerStatus playerStatus() const;
-    SrcId   currentSource() const;
-    bool    isInitialized() const { return initialized_; }
-    uint32_t queueSize() const { return queueCount_; }
+	[[nodiscard]] PlayerStatus playerStatus() const;
+	[[nodiscard]] SrcId currentSource() const;
+	[[nodiscard]] bool isInitialized() const { return initialized_; }
+	[[nodiscard]] uint32_t queueSize() const { return queueCount_; }
 
-    AudioMgr(const AudioMgr&) = delete;
+	AudioMgr(const AudioMgr&) = delete;
     AudioMgr& operator=(const AudioMgr&) = delete;
 
     /* ── Cmd — публичный для sendCmd_ (используется только внутри) ── */
@@ -105,8 +105,8 @@ private:
         bool     active    = false;
         uint8_t  volume    = 7;
         Output   output    = Output::FrontSpeaker;
-        ExternalFeed feed{nullptr, nullptr};
-    };
+		ExternalFeed feed{.feed = nullptr, .ctx = nullptr};
+	};
     static constexpr uint32_t kMaxSources = (uint32_t)SrcId::Count;
     SourceInfo sources_[kMaxSources]{};
     SrcId currentSrc_ = SrcId::Disabled;

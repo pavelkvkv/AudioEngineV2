@@ -20,13 +20,13 @@ public:
     virtual bool     open(FsAdapter& fs) = 0;
     virtual uint32_t decode(s16* buf, uint32_t maxSamples) = 0;
     virtual void     seek(uint32_t sec) = 0;
-    virtual uint32_t position() const = 0;
-    virtual uint32_t duration() const = 0;
-    virtual uint32_t sampleRate() const = 0;
-    virtual void     close() = 0;
+	[[nodiscard]] virtual uint32_t position() const		   = 0;
+	[[nodiscard]] virtual uint32_t duration() const		   = 0;
+	[[nodiscard]] virtual uint32_t sampleRate() const	   = 0;
+	virtual void     close() = 0;
 
     enum class Status : uint8_t { Closed, Ready, Playing, Error };
-    Status status() const { return status_; }
+	[[nodiscard]] Status status() const { return status_; }
 
 protected:
     Status status_ = Status::Closed;

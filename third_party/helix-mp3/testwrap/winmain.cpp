@@ -41,9 +41,9 @@
  * winmain.cpp - command-line test app that uses C++ interface to MP3 decoder
  **************************************************************************************/
 
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
 
 #include "mpadecobjfixpt.h"
 #include "debug.h"
@@ -54,7 +54,7 @@
 
 static int FillReadBuffer(unsigned char *readBuf, unsigned char *readPtr, int bufSize, int bytesLeft, FILE *infile)
 {
-	int nRead;
+	int nRead = 0;
 
 	/* move last, small chunk from end of buffer to start, then fill with new data */
 	memmove(readBuf, readPtr, bytesLeft);				
@@ -91,13 +91,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLin
 
 int main(int argc, char **argv)
 {
-	int bytesLeft, bytesIn, err, nRead, offset, outOfData, eofReached;
-	unsigned char readBuf[READBUF_SIZE], *readPtr;
+	int bytesLeft = 0, bytesIn = 0, err = 0, nRead = 0, offset = 0, outOfData = 0, eofReached = 0;
+	unsigned char readBuf[READBUF_SIZE], *readPtr = nullptr;
 	short outBuf[MAX_NCHAN * MAX_NGRAN * MAX_NSAMP];
-	FILE *infile, *outfile;
-	int initFlag, chans, bits;
-	unsigned long sampRate, outBytes;
-	CMpaDecObj *decobj;
+	FILE *infile = nullptr, *outfile = nullptr;
+	int initFlag = 0, chans = 0, bits = 0;
+	unsigned long sampRate = 0, outBytes = 0;
+	CMpaDecObj *decobj = nullptr;
 
 	if (argc != 3) {
 		printf("usage: mp3dec infile.mp3 outfile.pcm\n");
@@ -116,7 +116,7 @@ int main(int argc, char **argv)
 			return -1;
 		}
 	} else {
-		outfile = 0;	/* nul output */
+		outfile = nullptr; /* nul output */
 	}
 
 	DebugMemCheckInit();

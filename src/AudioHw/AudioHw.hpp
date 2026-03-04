@@ -18,12 +18,12 @@ public:
 
     /* ── Конфигурация ── */
     void setSampleRate(uint32_t rate);
-    uint32_t sampleRate() const { return sampleRate_; }
+	[[nodiscard]] uint32_t sampleRate() const { return sampleRate_; }
 
-    void start();
+	void start();
     void stop();
-    bool isStarted() const { return started_; }
-    void ampEnable(bool) {}  ///< Стаб для хоста (нет усилителя)
+	[[nodiscard]] bool isStarted() const { return started_; }
+	void ampEnable(bool) {}  ///< Стаб для хоста (нет усилителя)
 
     /* ── Прямая запись ── */
     struct WriteRegion {
@@ -40,9 +40,9 @@ public:
     /// Сбросить буфер (с опциональным fade-out).
     void flush(bool fadeOut = true);
     /// Сколько свободного места.
-    uint32_t freeSpace() const;
+	[[nodiscard]] uint32_t freeSpace() const;
 
-    static constexpr uint32_t RingSize = 8192;
+	static constexpr uint32_t RingSize = 8192;
 
     // Не копируем
     AudioHw(const AudioHw&) = delete;

@@ -15,9 +15,9 @@ public:
     void setRates(uint32_t inRate, uint32_t outRate);
 
     /// Число выходных сэмплов для inLen входных.
-    uint32_t outputLength(uint32_t inLen) const;
+	[[nodiscard]] uint32_t outputLength(uint32_t inLen) const;
 
-    /// Ресемплировать src → два сегмента dst. Возвращает число записанных.
+	/// Ресемплировать src → два сегмента dst. Возвращает число записанных.
     uint32_t process(const s16* src, uint32_t srcLen,
                      s16* dst1, uint32_t dst1Cap,
                      s16* dst2, uint32_t dst2Cap) const;

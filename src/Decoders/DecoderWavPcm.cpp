@@ -1,6 +1,7 @@
 /// @file DecoderWavPcm.cpp
 #include "DecoderWavPcm.hpp"
 #include "FsAdapter/FsAdapter.hpp"
+#include <algorithm>
 #include <cstring>
 #include <algorithm>
 
@@ -68,8 +69,8 @@ uint32_t DecoderWavPcm::decode(s16* buf, uint32_t maxSamples) {
     uint32_t framesToRead = maxSamples;
     uint32_t bytesLeft = (dataSize_ > bytesRead_) ? (dataSize_ - bytesRead_) : 0;
     uint32_t framesLeft = bytesLeft / bpf;
-    if (framesToRead > framesLeft) framesToRead = framesLeft;
-    if (framesToRead == 0) { status_ = Status::Closed; return 0; }
+	framesToRead		  = std::min(framesToRead, framesLeft);
+	if (framesToRead == 0) { status_ = Status::Closed; return 0; }
 
     /* ── Быстрый путь: 16-bit mono — читаем напрямую в выходной буфер ── */
     if (bitsPerSample_ == 16 && channels_ == 1) {
@@ -105,19 +106,19 @@ uint32_t DecoderWavPcm::decode(s16* buf, uint32_t maxSamples) {
     if (bitsPerSample_ == 16 && channels_ == 2) {
         const s16* samples = reinterpret_cast<const s16*>(raw);
         for (uint32_t i = 0; i < actualFrames; ++i) {
-            buf[i] = (s16)(((int32_t)samples[i * 2] + (int32_t)samples[i * 2 + 1]) / 2);
-        }
+			buf[i] = (s16)(((int32_t)samples[i * 2] + (int32_t)samples[(i * 2) + 1]) / 2);
+		}
         if (allocated) delete[] raw;
         return actualFrames;
     }
 
     /* ── Общий путь: любая комбинация bps/channels ── */
     for (uint32_t i = 0; i < actualFrames; ++i) {
-        const uint8_t* frame = raw + i * bpf;
-        int32_t monoSum = 0;
+		const uint8_t *frame = raw + (i * bpf);
+		int32_t monoSum = 0;
         for (uint16_t ch = 0; ch < channels_; ++ch) {
-            const uint8_t* sample = frame + ch * (bitsPerSample_ / 8);
-            int32_t val = 0;
+			const uint8_t *sample = frame + (ch * (bitsPerSample_ / 8));
+			int32_t val = 0;
             switch (bitsPerSample_) {
                 case 8:
                     val = ((int32_t)sample[0] - 128) << 8;
@@ -152,8 +153,8 @@ void DecoderWavPcm::seek(uint32_t sec) {
     if (!fs_) return;
     uint32_t bpf = bytesPerFrame_();
     uint32_t bytePos = sec * sampleRate_ * bpf;
-    if (bytePos > dataSize_) bytePos = dataSize_;
-    bytesRead_ = bytePos;
+	bytePos			 = std::min(bytePos, dataSize_);
+	bytesRead_ = bytePos;
     fs_->seek(dataOffset_ + bytePos);
     if (status_ == Status::Closed) status_ = Status::Ready;
 }

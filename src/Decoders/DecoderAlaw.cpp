@@ -1,6 +1,7 @@
 /// @file DecoderAlaw.cpp — G.711 A-law
 #include "DecoderAlaw.hpp"
 #include "FsAdapter/FsAdapter.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace ae2 {
@@ -19,7 +20,8 @@ bool DecoderAlaw::open(FsAdapter& fs) {
     if (std::memcmp(hdr,"RIFF",4)||std::memcmp(hdr+8,"WAVE",4)) return false;
 
     uint32_t pos = 12;
-    bool gotFmt = false, gotData = false;
+    bool gotFmt = false;
+    bool gotData = false;
     while (pos+8 < fs.size()) {
         fs.seek(pos);
         uint8_t ch[8]; if (fs.read(ch,8)<8) break;
@@ -48,8 +50,8 @@ s16 DecoderAlaw::decodeSample(uint8_t alaw) {
     int sign = (alaw & 0x80) ? -1 : 1;
     int exp  = (alaw >> 4) & 7;
     int mant = alaw & 0x0F;
-    int val;
-    if (exp == 0)
+	int val	 = 0;
+	if (exp == 0)
         val = (mant << 4) + 8;
     else
         val = ((mant << 4) + 0x108) << (exp - 1);
@@ -61,8 +63,8 @@ uint32_t DecoderAlaw::decode(s16* buf, uint32_t maxSamples) {
     status_ = Status::Playing;
     uint32_t bytesLeft = (dataSize_ > bytesRead_) ? (dataSize_ - bytesRead_) : 0;
     uint32_t framesToRead = bytesLeft / channels_;
-    if (framesToRead > maxSamples) framesToRead = maxSamples;
-    if (framesToRead == 0) { status_ = Status::Closed; return 0; }
+	framesToRead		  = std::min(framesToRead, maxSamples);
+	if (framesToRead == 0) { status_ = Status::Closed; return 0; }
 
     uint32_t rawBytes = framesToRead * channels_;
     uint8_t tmp[2048];
@@ -76,8 +78,8 @@ uint32_t DecoderAlaw::decode(s16* buf, uint32_t maxSamples) {
     for (uint32_t i = 0; i < framesToRead; ++i) {
         int32_t sum = 0;
         for (uint16_t c = 0; c < channels_; ++c)
-            sum += decodeSample(raw[i * channels_ + c]);
-        buf[i] = (s16)(sum / channels_);
+			sum += decodeSample(raw[(i * channels_) + c]);
+		buf[i] = (s16)(sum / channels_);
     }
     if (alloc) delete[] raw;
     return framesToRead;
@@ -86,8 +88,8 @@ uint32_t DecoderAlaw::decode(s16* buf, uint32_t maxSamples) {
 void DecoderAlaw::seek(uint32_t sec) {
     if (!fs_) return;
     uint32_t bytePos = sec * sampleRate_ * channels_;
-    if (bytePos > dataSize_) bytePos = dataSize_;
-    bytesRead_ = bytePos;
+	bytePos			 = std::min(bytePos, dataSize_);
+	bytesRead_ = bytePos;
     fs_->seek(dataOffset_ + bytePos);
 }
 

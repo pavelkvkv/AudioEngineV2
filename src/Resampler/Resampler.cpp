@@ -1,5 +1,6 @@
 /// @file Resampler.cpp
 #include "Resampler.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace ae2 {
@@ -69,9 +70,9 @@ uint32_t Resampler::process(const s16* src, uint32_t srcLen,
 
     uint32_t outTotal = outputLength(srcLen);
     uint32_t maxOut = dst1Cap + dst2Cap;
-    if (outTotal > maxOut) outTotal = maxOut;
+	outTotal		  = std::min(outTotal, maxOut);
 
-    /* Разделяем вывод на два сегмента, убираем ветвление из горячего цикла */
+	/* Разделяем вывод на два сегмента, убираем ветвление из горячего цикла */
     uint32_t seg1 = (outTotal > dst1Cap) ? dst1Cap : outTotal;
     uint32_t seg2 = outTotal - seg1;
     uint64_t phase = 0;

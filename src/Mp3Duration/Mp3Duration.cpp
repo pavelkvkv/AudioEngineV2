@@ -75,8 +75,8 @@ static FrameInfo parseFrame(const uint8_t* h) {
         if (lIdx == 0) /* Layer 1 */
             fi.frameSize = (uint16_t)((12 * fi.bitrate / fi.sampleRate + padding) * 4);
         else
-            fi.frameSize = (uint16_t)(fi.samplesPerFrame / 8 * fi.bitrate / fi.sampleRate + padding);
-    }
+			fi.frameSize = (uint16_t)((fi.samplesPerFrame / 8 * fi.bitrate / fi.sampleRate) + padding);
+	}
     return fi;
 }
 

@@ -100,9 +100,9 @@ void AudioHw::drain_() {
         }
         /* Эмулируем потребление ~1мс данных */
         uint32_t samplesToConsume = sampleRate_ / 1000;
-        if (samplesToConsume < 1) samplesToConsume = 1;
+		samplesToConsume		  = std::max<uint32_t>(samplesToConsume, 1);
 
-        uint32_t w = writePos_.load(std::memory_order_acquire);
+		uint32_t w = writePos_.load(std::memory_order_acquire);
         uint32_t r = readPos_.load(std::memory_order_relaxed);
         uint32_t avail = (w >= r) ? (w - r) : (RingSize - r + w);
 

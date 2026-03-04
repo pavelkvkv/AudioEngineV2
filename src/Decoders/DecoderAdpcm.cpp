@@ -1,6 +1,7 @@
 /// @file DecoderAdpcm.cpp — IMA ADPCM
 #include "DecoderAdpcm.hpp"
 #include "FsAdapter/FsAdapter.hpp"
+#include <algorithm>
 #include <cstring>
 #include <algorithm>
 
@@ -36,7 +37,8 @@ bool DecoderAdpcm::open(FsAdapter& fs) {
     if (std::memcmp(hdr,"RIFF",4)||std::memcmp(hdr+8,"WAVE",4)) return false;
 
     uint32_t pos = 12;
-    bool gotFmt = false, gotData = false;
+    bool gotFmt = false;
+    bool gotData = false;
     while (pos+8 < fs.size()) {
         fs.seek(pos);
         uint8_t ch[8]; if (fs.read(ch,8)<8) break;
@@ -75,14 +77,14 @@ s16 DecoderAdpcm::decodeNibble(uint8_t nibble, AdpcmState& state) {
     if (nibble & 8) diff = -diff;
 
     int pred = state.predictor + diff;
-    if (pred > 32767) pred = 32767;
-    if (pred < -32768) pred = -32768;
-    state.predictor = (s16)pred;
+	pred			= std::min(pred, 32767);
+	pred			= std::max(pred, -32768);
+	state.predictor = (s16)pred;
 
     int idx = state.stepIndex + kIndexTable[nibble & 0x0F];
-    if (idx < 0) idx = 0;
-    if (idx > 88) idx = 88;
-    state.stepIndex = (uint8_t)idx;
+	idx				= std::max(idx, 0);
+	idx				= std::min(idx, 88);
+	state.stepIndex = (uint8_t)idx;
 
     return state.predictor;
 }
@@ -155,8 +157,8 @@ uint32_t DecoderAdpcm::decodeOneBlock_() {
         uint32_t off = c * 4;
         states[c].predictor = (s16)(block[off] | (block[off+1] << 8));
         states[c].stepIndex = block[off+2];
-        if (states[c].stepIndex > 88) states[c].stepIndex = 88;
-    }
+		states[c].stepIndex = std::min<uint8_t>(states[c].stepIndex, 88);
+	}
 
     /* Первый сэмпл — predictor из заголовка */
     if (channels_ == 1) {
@@ -180,8 +182,10 @@ uint32_t DecoderAdpcm::decodeOneBlock_() {
         /* Stereo: interleaved 4-byte chunks per channel */
         uint32_t pos_ = dataStart;
         while (pos_ + 8 <= blockAlign_ && outSamples < kMaxBlockSamples) {
-            s16 ch0[8], ch1[8];
-            int n0 = 0, n1 = 0;
+            s16 ch0[8];
+            s16 ch1[8];
+            int n0 = 0;
+            int n1 = 0;
             for (int b = 0; b < 4 && pos_ < blockAlign_; ++b, ++pos_) {
                 uint8_t byte = block[pos_];
                 ch0[n0++] = decodeNibble(byte & 0x0F, states[0]);
@@ -209,7 +213,7 @@ void DecoderAdpcm::seek(uint32_t sec) {
     if (targetBlock >= totalBlocks_) targetBlock = totalBlocks_ > 0 ? totalBlocks_ - 1 : 0;
     blocksRead_ = targetBlock;
     blockDecLen_ = blockDecPos_ = 0;  /* сброс буфера остатка */
-    fs_->seek(dataOffset_ + targetBlock * blockAlign_);
+	fs_->seek(dataOffset_ + (targetBlock * blockAlign_));
 }
 
 uint32_t DecoderAdpcm::position() const {
