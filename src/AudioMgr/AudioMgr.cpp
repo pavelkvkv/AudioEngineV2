@@ -497,10 +497,9 @@ void AudioMgr::pipelineTick_() {
         srcPtr  = decodeBuf_ + residualOffset_;
         decoded = residualCount_;
         residualCount_ = 0;
-        /* srcSampleRate берём текущий из декодера / источника */
         if (currentSrc_ == SrcId::Player && decoder_)
             srcSampleRate = decoder_->sampleRate();
-        /* volume уже применён при первом проходе */
+        pipeStats_.residuals++;
     } else {
         if (currentSrc_ == SrcId::Player) {
             if (playerState_ != PlayerState::Playing || !decoder_) return;
@@ -517,6 +516,7 @@ void AudioMgr::pipelineTick_() {
             if (decoded == 0) return;
         }
         srcPtr = decodeBuf_;
+        pipeStats_.decodes++;
 
         /* Volume */
         uint8_t volIdx = sources_[(int)currentSrc_].volume;
@@ -533,13 +533,24 @@ void AudioMgr::pipelineTick_() {
     uint32_t outLen = resamp->outputLength(decoded);
     if (outLen == 0) return;
 
-    auto wr = hw.acquireWrite(outLen, pdMS_TO_TICKS(100));
+    /* Ограничиваем запрос половиной буфера AudioCore (2048),
+     * чтобы не ждать невозможного при высоком коэффициенте ресемплинга
+     * (напр. 16кГц→128кГц: outLen=8192 > bufTotal=4096) */
+    static constexpr uint32_t kMaxAcquire = 2048;
+    uint32_t minRequest = std::min(outLen, kMaxAcquire);
+
+    TickType_t tBefore = xTaskGetTickCount();
+    auto wr = hw.acquireWrite(minRequest, pdMS_TO_TICKS(20));
+    TickType_t waitMs = xTaskGetTickCount() - tBefore;
+    pipeStats_.waitTicks += waitMs;
+    if (waitMs > pipeStats_.maxWait) pipeStats_.maxWait = waitMs;
+
     uint32_t available = wr.cap1 + wr.cap2;
     if (available == 0) {
-        /* Буфер полон — сохраняем всё как остаток на следующий тик */
         residualOffset_ = (uint32_t)(srcPtr - decodeBuf_);
         residualCount_  = decoded;
-        AE_LOGW("acquireWrite timeout (AudioHw stall?)");
+        pipeStats_.timeouts++;
+        AE_LOGW("acquireWrite timeout: outLen=%lu free=0", (unsigned long)outLen);
         return;
     }
 
@@ -549,7 +560,10 @@ void AudioMgr::pipelineTick_() {
         usable = resamp->maxInput(available);
         if (usable == 0) usable = 1;
         if (usable > decoded) usable = decoded;
+        pipeStats_.truncations++;
     }
+
+    pipeStats_.samplesIn += usable;
 
     uint32_t outWritten;
     { APROF_SCOPE(Resample);
@@ -558,6 +572,7 @@ void AudioMgr::pipelineTick_() {
     { APROF_SCOPE(Enqueue);
     hw.commitWrite(outWritten);
     }
+    pipeStats_.samplesOut += outWritten;
 
     /* Сохраняем остаток, если обработали не всё */
     if (usable < decoded) {
@@ -604,12 +619,32 @@ void AudioMgr::taskLoop_() {
                         (unsigned long)st.duration,
                         (unsigned)st.positionPercent);
             }
+
+            /* Диагностика пайплайна — раз в 2 секунды */
+            if ((now - lastPipeStatsLog_) >= pdMS_TO_TICKS(2000)) {
+                lastPipeStatsLog_ = now;
+                auto& s = pipeStats_;
+                AE_LOGI("pipe: loop=%lu dec=%lu res=%lu trunc=%lu tout=%lu "
+                        "wait=%lums maxW=%lums in=%lu out=%lu free=%lu",
+                        (unsigned long)s.loopIter,
+                        (unsigned long)s.decodes,
+                        (unsigned long)s.residuals,
+                        (unsigned long)s.truncations,
+                        (unsigned long)s.timeouts,
+                        (unsigned long)s.waitTicks,
+                        (unsigned long)s.maxWait,
+                        (unsigned long)s.samplesIn,
+                        (unsigned long)s.samplesOut,
+                        (unsigned long)AudioHw::instance().freeSpace());
+                s = {};  // сброс
+            }
         }
 
         if (currentSrc_ == SrcId::Disabled) {
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
             continue;
         }
+        pipeStats_.loopIter++;
         pipelineTick_();
         vTaskDelay(1);
     }

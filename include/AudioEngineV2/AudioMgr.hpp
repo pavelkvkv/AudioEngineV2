@@ -144,6 +144,20 @@ private:
     uint32_t residualCount_{0};   ///< необработанных сэмплов с прошлого тика
     uint32_t residualOffset_{0};  ///< смещение в decodeBuf_
 
+    /* ── Диагностика пайплайна ── */
+    struct PipeStats {
+        uint32_t loopIter    = 0; ///< итерации главного цикла
+        uint32_t decodes     = 0; ///< вызовы decode
+        uint32_t residuals   = 0; ///< использования остатка
+        uint32_t truncations = 0; ///< раз usable < decoded
+        uint32_t timeouts    = 0; ///< таймаут acquireWrite
+        uint32_t waitTicks   = 0; ///< суммарное ожидание в acquireWrite (тики)
+        uint32_t maxWait     = 0; ///< макс. ожидание за период (тики)
+        uint32_t samplesIn   = 0; ///< входных сэмплов обработано
+        uint32_t samplesOut  = 0; ///< выходных сэмплов записано
+    } pipeStats_;
+    TickType_t lastPipeStatsLog_ = 0;
+
     /* ── Ресемплер ── */
     alignas(4) uint8_t resamplerMem_[32]{};  ///< placement-хранилище для Resampler
     void* resampler_ = nullptr;
