@@ -17,6 +17,9 @@ public:
     /// Число выходных сэмплов для inLen входных.
 	[[nodiscard]] uint32_t outputLength(uint32_t inLen) const;
 
+	/// Макс. число входных сэмплов, дающих не более maxOutput выходных.
+	[[nodiscard]] uint32_t maxInput(uint32_t maxOutput) const;
+
 	/// Ресемплировать src → два сегмента dst. Возвращает число записанных.
     uint32_t process(const s16* src, uint32_t srcLen,
                      s16* dst1, uint32_t dst1Cap,

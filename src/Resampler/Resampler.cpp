@@ -21,6 +21,11 @@ uint32_t Resampler::outputLength(uint32_t inLen) const {
     return (uint32_t)(((uint64_t)inLen * outRate_ + inRate_ - 1) / inRate_);
 }
 
+uint32_t Resampler::maxInput(uint32_t maxOutput) const {
+    if (inRate_ == 0 || inRate_ == outRate_) return maxOutput;
+    return (uint32_t)((uint64_t)maxOutput * inRate_ / outRate_);
+}
+
 /* ── Вспомогательная: линейная интерполяция для одного сегмента ── */
 static inline void resampleLinear_(const s16* src, uint32_t srcLen,
                                    s16* dst, uint32_t count,

@@ -260,6 +260,7 @@ void AudioMgr::processCommands_() {
 
         case Cmd::Stop:
             AE_LOGI("cmd: stop");
+            residualCount_ = 0;
             destroyDecoder(decoder_);
             fs_->close();
             playerState_ = PlayerState::Stopped;
@@ -376,6 +377,7 @@ void AudioMgr::routerUpdate_() {
 }
 
 void AudioMgr::switchSource_(SrcId newId) {
+    residualCount_ = 0;
     AE_LOGI("source switch: %s -> %s", srcIdName_(currentSrc_), srcIdName_(newId));
 
     /* При уходе со старого источника: отключить усилитель если был FrontSpeaker */
@@ -414,6 +416,7 @@ void AudioMgr::switchSource_(SrcId newId) {
 /* ═══ Next track ═══ */
 
 void AudioMgr::startNextTrack_() {
+    residualCount_ = 0;
     destroyDecoder(decoder_);
     fs_->close();
 
@@ -487,29 +490,42 @@ void AudioMgr::pipelineTick_() {
 
     uint32_t decoded = 0;
     uint32_t srcSampleRate = hw.sampleRate();
+    s16* srcPtr = decodeBuf_;
 
-    if (currentSrc_ == SrcId::Player) {
-        if (playerState_ != PlayerState::Playing || !decoder_) return;
-        { APROF_SCOPE(Decode);
-        decoded = decoder_->decode(decodeBuf_, 1024);
-        }
-        if (decoded == 0) { startNextTrack_(); return; }
-        srcSampleRate = decoder_->sampleRate();
+    /* ── Есть остаток с прошлого тика — используем его, не декодируя ── */
+    if (residualCount_ > 0) {
+        srcPtr  = decodeBuf_ + residualOffset_;
+        decoded = residualCount_;
+        residualCount_ = 0;
+        /* srcSampleRate берём текущий из декодера / источника */
+        if (currentSrc_ == SrcId::Player && decoder_)
+            srcSampleRate = decoder_->sampleRate();
+        /* volume уже применён при первом проходе */
     } else {
-        uint8_t idx = (uint8_t)currentSrc_;
-        if (idx >= kMaxSources || !sources_[idx].feed.feed) return;
-        decoded = sources_[idx].feed.feed(
-            sources_[idx].feed.ctx, decodeBuf_, 1024, &srcSampleRate);
-        if (decoded == 0) return;
-    }
+        if (currentSrc_ == SrcId::Player) {
+            if (playerState_ != PlayerState::Playing || !decoder_) return;
+            { APROF_SCOPE(Decode);
+            decoded = decoder_->decode(decodeBuf_, 1024);
+            }
+            if (decoded == 0) { startNextTrack_(); return; }
+            srcSampleRate = decoder_->sampleRate();
+        } else {
+            uint8_t idx = (uint8_t)currentSrc_;
+            if (idx >= kMaxSources || !sources_[idx].feed.feed) return;
+            decoded = sources_[idx].feed.feed(
+                sources_[idx].feed.ctx, decodeBuf_, 1024, &srcSampleRate);
+            if (decoded == 0) return;
+        }
+        srcPtr = decodeBuf_;
 
-    /* Volume */
-    uint8_t volIdx = sources_[(int)currentSrc_].volume;
-    if (volIdx < 7) {
-        APROF_BEGIN(Volume);
-        int16_t scale = kVolumeTable[volIdx];
-        arm_scale_q15(decodeBuf_, scale, 0, decodeBuf_, decoded);
-        APROF_END(Volume);
+        /* Volume */
+        uint8_t volIdx = sources_[(int)currentSrc_].volume;
+        if (volIdx < 7) {
+            APROF_BEGIN(Volume);
+            int16_t scale = kVolumeTable[volIdx];
+            arm_scale_q15(decodeBuf_, scale, 0, decodeBuf_, decoded);
+            APROF_END(Volume);
+        }
     }
 
     /* Resample + write */
@@ -518,17 +534,35 @@ void AudioMgr::pipelineTick_() {
     if (outLen == 0) return;
 
     auto wr = hw.acquireWrite(outLen, pdMS_TO_TICKS(100));
-    if (wr.cap1 + wr.cap2 == 0) {
+    uint32_t available = wr.cap1 + wr.cap2;
+    if (available == 0) {
+        /* Буфер полон — сохраняем всё как остаток на следующий тик */
+        residualOffset_ = (uint32_t)(srcPtr - decodeBuf_);
+        residualCount_  = decoded;
         AE_LOGW("acquireWrite timeout (AudioHw stall?)");
         return;
     }
 
-    uint32_t toWrite = std::min(outLen, wr.cap1 + wr.cap2);
+    /* Ограничиваем вход по доступному выходному месту */
+    uint32_t usable = decoded;
+    if (available < outLen) {
+        usable = resamp->maxInput(available);
+        if (usable == 0) usable = 1;
+        if (usable > decoded) usable = decoded;
+    }
+
+    uint32_t outWritten;
     { APROF_SCOPE(Resample);
-    resamp->process(decodeBuf_, decoded, wr.ptr1, wr.cap1, wr.ptr2, wr.cap2);
+    outWritten = resamp->process(srcPtr, usable, wr.ptr1, wr.cap1, wr.ptr2, wr.cap2);
     }
     { APROF_SCOPE(Enqueue);
-    hw.commitWrite(toWrite);
+    hw.commitWrite(outWritten);
+    }
+
+    /* Сохраняем остаток, если обработали не всё */
+    if (usable < decoded) {
+        residualOffset_ = (uint32_t)(srcPtr - decodeBuf_) + usable;
+        residualCount_  = decoded - usable;
     }
 }
 

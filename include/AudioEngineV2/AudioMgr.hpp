@@ -141,6 +141,8 @@ private:
 
     /* ── Буферы пайплайна ── */
     s16 decodeBuf_[2048]{};
+    uint32_t residualCount_{0};   ///< необработанных сэмплов с прошлого тика
+    uint32_t residualOffset_{0};  ///< смещение в decodeBuf_
 
     /* ── Ресемплер ── */
     alignas(4) uint8_t resamplerMem_[32]{};  ///< placement-хранилище для Resampler
