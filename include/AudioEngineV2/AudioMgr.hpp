@@ -3,6 +3,7 @@
 /// @brief Единый аудиоменеджер: роутер + плеер + пайплайн.
 
 #include "AudioEngineV2/Types.hpp"
+#include "PlayerSpiProtocol.hpp"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
@@ -36,6 +37,7 @@ public:
     void addFile(const char* path, uint32_t startSec = 0,
                  Output out = Output::FrontSpeaker, bool front = false);
     void clearQueue();
+    void removeFromQueue(uint32_t trackId);
     void seek(uint32_t sec);
     void forward(uint32_t sec = 10);
     void rewind(uint32_t sec = 10);
@@ -44,6 +46,10 @@ public:
     void setVolume(SrcId id, uint8_t vol);
     void setSampleRate(uint32_t rate);
     void volumeChanged();
+
+    /* ── Callback на изменение состояния заднего выхода ── */
+    using RearOutputCb = void(*)(bool active);
+    void setRearOutputCb(RearOutputCb cb);
 
     /* ── Статус (lock-free, один writer) ── */
     struct PlayerStatus {
@@ -60,6 +66,10 @@ public:
 	[[nodiscard]] bool isInitialized() const { return initialized_; }
 	[[nodiscard]] uint32_t queueSize() const { return queueCount_; }
 
+    /// Заполняет снэпшот очереди в формате протокола SPI.
+    /// @return количество записанных элементов
+    uint8_t getQueueSnapshot(PlayerQueueEntry* out, uint8_t maxEntries) const;
+
 	AudioMgr(const AudioMgr&) = delete;
     AudioMgr& operator=(const AudioMgr&) = delete;
 
@@ -70,7 +80,8 @@ public:
             Seek, Forward, Rewind,
             Activate, Deactivate,
             SetVolume, SetSampleRate,
-            VolumeChanged
+            VolumeChanged,
+            RemoveQueueItem
         };
         Type type;
         union {
@@ -79,6 +90,7 @@ public:
             struct { uint8_t srcId; uint8_t vol; } volume;
             struct { uint32_t sec; } seek;
             struct { uint32_t rate; } sampleRate;
+            struct { uint32_t trackId; } remove;
         };
     };
 
@@ -120,6 +132,7 @@ private:
         uint32_t startSec = 0;
         Output   output   = Output::FrontSpeaker;
         bool     used     = false;
+        uint32_t trackId  = 0;  ///< Стабильный ID трека (0 = невалидный)
     };
     static constexpr uint32_t kMaxQueue = 16;
     QueueEntry queue_[kMaxQueue]{};
@@ -127,10 +140,16 @@ private:
     uint32_t queueTail_ = 0;
     uint32_t queueCount_ = 0;
 
+    uint32_t nextTrackId_ = 1;  ///< Следующий ID трека (инкрементный)
     bool queuePush_(const char* path, uint32_t startSec, Output out);
     bool queuePushFront_(const char* path, uint32_t startSec, Output out);
     bool queuePop_(QueueEntry& out);
     void queueClear_();
+    bool queueRemoveById_(uint32_t trackId);
+
+    /* ── Текущий трек ── */
+    char   currentPath_[128]{};                 ///< Путь текущего воспроизводимого файла
+    Output currentOutput_{Output::FrontSpeaker}; ///< Выход текущего воспроизводимого файла
 
     /* ── Декодер ── */
     alignas(16) uint8_t decoderMem_[8192]{};
@@ -141,8 +160,9 @@ private:
 
     /* ── Буферы пайплайна ── */
     s16 decodeBuf_[2048]{};
-    uint32_t residualCount_{0};   ///< необработанных сэмплов с прошлого тика
-    uint32_t residualOffset_{0};  ///< смещение в decodeBuf_
+    uint32_t residualCount_{0};      ///< необработанных сэмплов с прошлого тика
+    uint32_t residualOffset_{0};     ///< смещение в decodeBuf_
+    uint32_t residualSampleRate_{0}; ///< частота дискретизации остатка
 
     /* ── Диагностика пайплайна ── */
     struct PipeStats {
@@ -172,10 +192,18 @@ private:
     /* ── Статус ── */
     volatile PlayerStatus status_{};
     volatile SrcId currentSrcAtomic_ = SrcId::Disabled;
+    volatile uint8_t queueSnapshotCount_ = 0;
+    PlayerQueueEntry queueSnapshot_[PLAYER_MAX_QUEUE]{};
+    uint32_t currentTrackId_ = 0;  ///< trackId текущего воспроизводимого трека
     void updateStatus_();
 
     bool initialized_ = false;
     TickType_t lastProgressLog_ = 0;  ///< Тик последнего лога прогресса
+
+    /* ── Уведомление о заднем выходе ── */
+    RearOutputCb rearOutputCb_ = nullptr;
+    bool rearOutputActive_ = false;
+    void notifyRearOutput_(bool active);
 };
 
 } // namespace ae2

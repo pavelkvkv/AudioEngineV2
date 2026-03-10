@@ -129,6 +129,10 @@ void AudioMgr::addFile(const char* path, uint32_t startSec, Output out, bool fro
 
 void AudioMgr::clearQueue() { Cmd c{}; c.type = Cmd::ClearQueue; sendCmd_(cmdQueue_, c); }
 
+void AudioMgr::removeFromQueue(uint32_t trackId) {
+    Cmd c{}; c.type = Cmd::RemoveQueueItem; c.remove.trackId = trackId; sendCmd_(cmdQueue_, c);
+}
+
 void AudioMgr::seek(uint32_t sec) {
     Cmd c{}; c.type = Cmd::Seek; c.seek.sec = sec; sendCmd_(cmdQueue_, c);
 }
@@ -187,6 +191,7 @@ bool AudioMgr::queuePush_(const char* path, uint32_t startSec, Output out) {
     std::strncpy(e.path, path, sizeof(e.path) - 1);
     e.path[sizeof(e.path)-1] = '\0';
     e.startSec = startSec; e.output = out; e.used = true;
+    e.trackId = nextTrackId_++;
     queueTail_ = (queueTail_ + 1) % kMaxQueue;
     queueCount_++;
     return true;
@@ -199,6 +204,7 @@ bool AudioMgr::queuePushFront_(const char* path, uint32_t startSec, Output out) 
     std::strncpy(e.path, path, sizeof(e.path) - 1);
     e.path[sizeof(e.path)-1] = '\0';
     e.startSec = startSec; e.output = out; e.used = true;
+    e.trackId = nextTrackId_++;
     queueCount_++;
     return true;
 }
@@ -215,6 +221,35 @@ bool AudioMgr::queuePop_(QueueEntry& out) {
 void AudioMgr::queueClear_() {
     for (auto& e : queue_) e.used = false;
     queueHead_ = queueTail_ = queueCount_ = 0;
+}
+
+bool AudioMgr::queueRemoveById_(uint32_t trackId) {
+    if (queueCount_ == 0 || trackId == PLAYER_INVALID_ID) return false;
+    /* Ищем элемент с данным trackId, перестраиваем очередь без него */
+    uint32_t found = 0;
+    for (uint32_t i = 0; i < queueCount_; ++i) {
+        uint32_t idx = (queueHead_ + i) % kMaxQueue;
+        if (queue_[idx].trackId == trackId) { found++; continue; }
+    }
+    if (found == 0) return false;
+    /* Перестраиваем: копируем элементы без удалённого в начало */
+    QueueEntry tmp[kMaxQueue];
+    uint32_t newCount = 0;
+    for (uint32_t i = 0; i < queueCount_; ++i) {
+        uint32_t idx = (queueHead_ + i) % kMaxQueue;
+        if (queue_[idx].trackId == trackId) continue;
+        tmp[newCount++] = queue_[idx];
+    }
+    for (uint32_t i = 0; i < newCount; ++i) {
+        queue_[i] = tmp[i];
+    }
+    for (uint32_t i = newCount; i < kMaxQueue; ++i) {
+        queue_[i].used = false;
+    }
+    queueHead_ = 0;
+    queueTail_ = newCount % kMaxQueue;
+    queueCount_ = newCount;
+    return true;
 }
 
 /* ═══ Helpers ═══ */
@@ -260,9 +295,12 @@ void AudioMgr::processCommands_() {
 
         case Cmd::Stop:
             AE_LOGI("cmd: stop");
+            notifyRearOutput_(false);
             residualCount_ = 0;
             destroyDecoder(decoder_);
             fs_->close();
+            currentPath_[0] = '\0';
+            currentTrackId_ = 0;
             playerState_ = PlayerState::Stopped;
             sources_[(int)SrcId::Player].wantPlay = false;
             /* routerUpdate_() ниже вызовет switchSource_(Disabled) → amp off + DMA stop */
@@ -282,16 +320,29 @@ void AudioMgr::processCommands_() {
 
         case Cmd::AddFileFront:
             AE_LOGI("queue add front: %s", cmd.file.path);
+            /* Если сейчас что-то играет — возвращаем текущий трек в очередь с текущей позицией */
+            if (decoder_ && currentPath_[0] != '\0') {
+                uint32_t pos = decoder_->position();
+                if (queuePushFront_(currentPath_, pos, currentOutput_)) {
+                    AE_LOGI("saved current track pos=%lu: %s", (unsigned long)pos, currentPath_);
+                } else {
+                    AE_LOGW("queue full, current track lost: %s", currentPath_);
+                }
+            }
             destroyDecoder(decoder_);
             fs_->close();
+            currentPath_[0] = '\0';
             queuePushFront_(cmd.file.path, cmd.file.startSec, (Output)cmd.file.output);
             sources_[(int)SrcId::Player].wantPlay = true;
             startNextTrack_();
             break;
 
         case Cmd::ClearQueue:
+            notifyRearOutput_(false);
             destroyDecoder(decoder_);
             fs_->close();
+            currentPath_[0] = '\0';
+            currentTrackId_ = 0;
             queueClear_();
             playerState_ = PlayerState::Stopped;
             sources_[(int)SrcId::Player].wantPlay = false;
@@ -337,6 +388,15 @@ void AudioMgr::processCommands_() {
 
         case Cmd::SetSampleRate:
             AudioHw::instance().setSampleRate(cmd.sampleRate.rate);
+            break;
+
+        case Cmd::RemoveQueueItem:
+            if (queueRemoveById_(cmd.remove.trackId)) {
+                AE_LOGI("queue remove trackId=%lu (q=%lu)",
+                        (unsigned long)cmd.remove.trackId, (unsigned long)queueCount_);
+            } else {
+                AE_LOGD("queue remove trackId=%lu not found", (unsigned long)cmd.remove.trackId);
+            }
             break;
 
         case Cmd::VolumeChanged:
@@ -423,6 +483,9 @@ void AudioMgr::startNextTrack_() {
     QueueEntry entry;
     if (!queuePop_(entry)) {
         AE_LOGD("queue empty, player stopped");
+        notifyRearOutput_(false);
+        currentPath_[0] = '\0';
+        currentTrackId_ = 0;
         playerState_ = PlayerState::Stopped;
         sources_[(int)SrcId::Player].wantPlay = false;
         return;
@@ -458,6 +521,11 @@ void AudioMgr::startNextTrack_() {
     playerState_ = PlayerState::Playing;
     sources_[(int)SrcId::Player].wantPlay = true;
     sources_[(int)SrcId::Player].output = entry.output;
+    /* Сохраняем путь, выход и trackId текущего трека */
+    std::strncpy(currentPath_, entry.path, sizeof(currentPath_) - 1);
+    currentPath_[sizeof(currentPath_) - 1] = '\0';
+    currentOutput_ = entry.output;
+    currentTrackId_ = entry.trackId;
 
     /* Обновляем громкость из настроек для нового выхода */
 #ifdef HAS_SETTINGS
@@ -480,6 +548,7 @@ void AudioMgr::startNextTrack_() {
         ((char*)status_.filename)[len] = '\0';
     }
     AE_LOGI("playing: %s (dur=%lu sec)", entry.path, (unsigned long)decoder_->duration());
+    notifyRearOutput_(entry.output == Output::RearLineout);
 }
 
 /* ═══ Pipeline tick ═══ */
@@ -497,8 +566,7 @@ void AudioMgr::pipelineTick_() {
         srcPtr  = decodeBuf_ + residualOffset_;
         decoded = residualCount_;
         residualCount_ = 0;
-        if (currentSrc_ == SrcId::Player && decoder_)
-            srcSampleRate = decoder_->sampleRate();
+        srcSampleRate = residualSampleRate_;
         pipeStats_.residuals++;
     } else {
         if (currentSrc_ == SrcId::Player) {
@@ -547,8 +615,9 @@ void AudioMgr::pipelineTick_() {
 
     uint32_t available = wr.cap1 + wr.cap2;
     if (available == 0) {
-        residualOffset_ = (uint32_t)(srcPtr - decodeBuf_);
-        residualCount_  = decoded;
+        residualOffset_     = (uint32_t)(srcPtr - decodeBuf_);
+        residualCount_      = decoded;
+        residualSampleRate_ = srcSampleRate;
         pipeStats_.timeouts++;
         AE_LOGW("acquireWrite timeout: outLen=%lu free=0", (unsigned long)outLen);
         return;
@@ -576,8 +645,9 @@ void AudioMgr::pipelineTick_() {
 
     /* Сохраняем остаток, если обработали не всё */
     if (usable < decoded) {
-        residualOffset_ = (uint32_t)(srcPtr - decodeBuf_) + usable;
-        residualCount_  = decoded - usable;
+        residualOffset_     = (uint32_t)(srcPtr - decodeBuf_) + usable;
+        residualCount_      = decoded - usable;
+        residualSampleRate_ = srcSampleRate;
     }
 }
 
@@ -597,6 +667,29 @@ void AudioMgr::updateStatus_() {
         st.position = st.duration = 0;
         st.positionPercent = 0;
     }
+
+    /* Снэпшот очереди */
+    uint8_t n = 0;
+    for (uint32_t i = 0; i < queueCount_ && n < PLAYER_MAX_QUEUE; ++i) {
+        uint32_t idx = (queueHead_ + i) % kMaxQueue;
+        auto& src = queue_[idx];
+        auto& dst = queueSnapshot_[n];
+        dst.trackId = src.trackId;
+        std::strncpy(dst.path, src.path, PLAYER_PATH_MAX - 1);
+        dst.path[PLAYER_PATH_MAX - 1] = '\0';
+        dst.positionSec = src.startSec;
+        dst.durationSec = 0;  // продолжительность неизвестна для элементов в очереди
+        dst.output = (uint8_t)src.output;
+        n++;
+    }
+    queueSnapshotCount_ = n;
+}
+
+uint8_t AudioMgr::getQueueSnapshot(PlayerQueueEntry* out, uint8_t maxEntries) const {
+    uint8_t count = queueSnapshotCount_;
+    if (count > maxEntries) count = maxEntries;
+    std::memcpy(out, (const PlayerQueueEntry*)queueSnapshot_, count * sizeof(PlayerQueueEntry));
+    return count;
 }
 
 /* ═══ Main loop ═══ */
@@ -648,6 +741,18 @@ void AudioMgr::taskLoop_() {
         pipelineTick_();
         vTaskDelay(1);
     }
+}
+
+/* ═══ Rear output notification ═══ */
+
+void AudioMgr::setRearOutputCb(RearOutputCb cb) {
+    rearOutputCb_ = cb;
+}
+
+void AudioMgr::notifyRearOutput_(bool active) {
+    if (active == rearOutputActive_) return;
+    rearOutputActive_ = active;
+    if (rearOutputCb_) rearOutputCb_(active);
 }
 
 } // namespace ae2
