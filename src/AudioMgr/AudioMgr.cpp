@@ -20,6 +20,7 @@
 #include <new>
 #include "RegionAllocator.h"
 #include "TaskPriorities.h"
+#include "Statuses.hpp"
 
 /* Подключение профайлера (только в прошивке, не на хосте) */
 #if defined(__has_include) && __has_include("AudioProfiler.hpp")
@@ -46,11 +47,12 @@
 #  define AE_LOGE(...) ((void)0)
 #endif
 
-/* Настройки громкости прошивки */
-#if defined(__has_include) && __has_include("settings.h")
-extern "C" {
-#  include "settings.h"
-}
+/* Настройки громкости прошивки: читаются из SettingsReader напрямую —
+ * Settings.audiochans[] / Settings.misc.* как источник истины убраны,
+ * audio reader живёт в /dat/conf/settings.json. */
+#if defined(__has_include) && __has_include("SettingsReader.hpp")
+#  include "SettingsReader.hpp"
+#  include "AudioEngineV2/AudioEngine_C.h"   // aeVolumeChanged, aeSetSampleRateParam
 #  define HAS_SETTINGS 1
 #endif
 
@@ -86,6 +88,21 @@ AudioMgr& AudioMgr::instance() {
     return mgr;
 }
 
+namespace {
+#ifdef HAS_SETTINGS
+void onVolumeSettingsChanged(uint32_t /*mask*/, void * /*ctx*/)
+{
+    // Замена ae::Settings_Received_callback: применить громкость + sample rate.
+    aeVolumeChanged();
+    if (setread::SettingsReader::instance().isReady()) {
+        const uint8_t dac_tweak =
+            setread::SettingsReader::instance().data().opo.dac_tweak;
+        aeSetSampleRateParam(dac_tweak);
+    }
+}
+#endif
+} // namespace
+
 AudioMgr::AudioMgr() {
     sources_[(int)SrcId::Disabled].priority = 0;
     sources_[(int)SrcId::Player].priority   = 1;
@@ -101,6 +118,16 @@ AudioMgr::AudioMgr() {
     AudioHw::instance().start();
     xTaskCreateInRegion(RegionAlloc::Zone::HEAP_ZONE_FAST, taskEntry_, "AudioMgr", 1024*6, this, PRIO_TASK_AUDIO_MGR, &task_);
     initialized_ = true;
+
+#ifdef HAS_SETTINGS
+    // Подписка на Volume и Opo группы в настройках. При изменении: обновить
+    // громкость через aeVolumeChanged и sample rate через aeSetSampleRateParam.
+    setread::SettingsReader::instance().subscribe(
+        setread::groupBit(setread::Group::Volume)
+      | setread::groupBit(setread::Group::Opo),
+        onVolumeSettingsChanged,
+        nullptr);
+#endif
 }
 
 /* ═══ sendCmd_ ═══ */
@@ -143,8 +170,8 @@ void AudioMgr::rewind(uint32_t sec) {
     Cmd c{}; c.type = Cmd::Rewind; c.seek.sec = sec; sendCmd_(cmdQueue_, c);
 }
 
-void AudioMgr::requestActivate(SrcId id) {
-    Cmd c{}; c.type = Cmd::Activate; c.source.srcId = (uint8_t)id; sendCmd_(cmdQueue_, c);
+void AudioMgr::requestActivate(SrcId id, Output out) {
+    Cmd c{}; c.type = Cmd::Activate; c.source.srcId = (uint8_t)id; c.source.output = (uint8_t)out; sendCmd_(cmdQueue_, c);
 }
 void AudioMgr::requestDeactivate(SrcId id) {
     Cmd c{}; c.type = Cmd::Deactivate; c.source.srcId = (uint8_t)id; sendCmd_(cmdQueue_, c);
@@ -273,13 +300,27 @@ void AudioMgr::processCommands_() {
         switch (cmd.type) {
         case Cmd::Play:
             if (playerState_ == PlayerState::Paused) {
-                AE_LOGI("cmd: play (resume)");
-                playerState_ = PlayerState::Playing;
                 sources_[(int)SrcId::Player].wantPlay = true;
+                if (isPlayerPreempted_()) {
+                    // Player вытеснен трансляцией/др. источником — не резюмим
+                    // playerState_ сейчас; switchSource_(...->Player) выполнит
+                    // переход Paused→Playing, когда вытеснитель уйдёт.
+                    AE_LOGI("cmd: play deferred (preempted by %s)",
+                            srcIdName_(currentSrc_));
+                } else {
+                    AE_LOGI("cmd: play (resume)");
+                    playerState_ = PlayerState::Playing;
+                }
             } else if (playerState_ == PlayerState::Stopped && queueCount_ > 0) {
-                AE_LOGI("cmd: play (start, queue=%lu)", (unsigned long)queueCount_);
                 sources_[(int)SrcId::Player].wantPlay = true;
-                startNextTrack_();
+                if (isPlayerPreempted_()) {
+                    AE_LOGI("cmd: play (start) deferred (preempted by %s, queue=%lu)",
+                            srcIdName_(currentSrc_), (unsigned long)queueCount_);
+                    // Декодер откроется в switchSource_(...->Player).
+                } else {
+                    AE_LOGI("cmd: play (start, queue=%lu)", (unsigned long)queueCount_);
+                    startNextTrack_();
+                }
             } else {
                 AE_LOGD("cmd: play ignored (state=%d, queue=%lu)",
                         (int)playerState_, (unsigned long)queueCount_);
@@ -311,7 +352,11 @@ void AudioMgr::processCommands_() {
                 AE_LOGD("queue add: %s (q=%lu)", cmd.file.path, (unsigned long)queueCount_);
                 if (playerState_ == PlayerState::Stopped) {
                     sources_[(int)SrcId::Player].wantPlay = true;
-                    startNextTrack_();
+                    if (!isPlayerPreempted_()) {
+                        startNextTrack_();
+                    }
+                    // Под вытеснением декодер не открываем — это сделает
+                    // switchSource_(...->Player), когда вытеснитель уйдёт.
                 }
             } else {
                 AE_LOGW("queue full, skipped: %s", cmd.file.path);
@@ -365,7 +410,10 @@ void AudioMgr::processCommands_() {
 
         case Cmd::Activate: {
             uint8_t idx = cmd.source.srcId;
-            if (idx < kMaxSources) sources_[idx].wantPlay = true;
+            if (idx < kMaxSources) {
+                sources_[idx].output = (Output)cmd.source.output;
+                sources_[idx].wantPlay = true;
+            }
         } break;
 
         case Cmd::Deactivate: {
@@ -402,13 +450,14 @@ void AudioMgr::processCommands_() {
         case Cmd::VolumeChanged:
 #ifdef HAS_SETTINGS
         {
-            /* Читаем громкость из настроек для текущего выхода плеера */
+            /* Читаем громкость из SettingsReader для текущего выхода плеера */
             Output pout = sources_[(int)SrcId::Player].output;
             uint8_t vol = 7; /* default passthrough */
-            if (pout == Output::FrontSpeaker)
-                vol = Settings.misc.volume_front;
-            else if (pout == Output::RearLineout)
-                vol = Settings.misc.volume_linout_opo;
+            if (setread::SettingsReader::instance().isReady()) {
+                const auto &v = setread::SettingsReader::instance().data().volume;
+                if (pout == Output::FrontSpeaker)      vol = v.front      & 0x0F;
+                else if (pout == Output::RearLineout)  vol = v.linout_opo & 0x0F;
+            }
 			vol									= std::min<uint8_t>(vol, 10);
 			sources_[(int)SrcId::Player].volume = vol;
             AE_LOGI("volume changed: out=%s vol=%u",
@@ -438,7 +487,10 @@ void AudioMgr::routerUpdate_() {
 
 void AudioMgr::switchSource_(SrcId newId) {
     residualCount_ = 0;
-    AE_LOGI("source switch: %s -> %s", srcIdName_(currentSrc_), srcIdName_(newId));
+    Output newOut = sources_[(int)newId].output;
+    AE_LOGI("source switch: %s -> %s, output=%s",
+            srcIdName_(currentSrc_), srcIdName_(newId),
+            (newOut == Output::FrontSpeaker) ? "Front" : "Rear");
 
     /* При уходе со старого источника: отключить усилитель если был FrontSpeaker */
     if (currentSrc_ != SrcId::Disabled) {
@@ -460,16 +512,32 @@ void AudioMgr::switchSource_(SrcId newId) {
         AudioHw::instance().stop();
         AE_LOGD("audio HW stopped, amp OFF");
     } else {
+        /* Переключаем GPIO-пин ЦАП на нужный выход */
+        AudioHw::instance().setOutput(newOut);
+        AE_LOGI("DAC output switched to %s",
+                (newOut == Output::FrontSpeaker) ? "FrontSpeaker" : "RearLineout");
+
         /* Запускаем ядро если было остановлено (idempotent) */
         AudioHw::instance().start();
         sources_[(int)newId].active = true;
         /* Включаем усилитель если новый источник выводит на FrontSpeaker */
-        if (sources_[(int)newId].output == Output::FrontSpeaker) {
+        if (newOut == Output::FrontSpeaker) {
             AudioHw::instance().ampEnable(true);
             AE_LOGD("amp ON (src=%s)", srcIdName_(newId));
         }
-        if (newId == SrcId::Player && playerState_ == PlayerState::Paused)
-            playerState_ = PlayerState::Playing;
+        if (newId == SrcId::Player) {
+            if (playerState_ == PlayerState::Paused) {
+                playerState_ = PlayerState::Playing;
+            } else if (playerState_ == PlayerState::Stopped &&
+                       sources_[(int)SrcId::Player].wantPlay &&
+                       queueCount_ > 0 && !decoder_) {
+                // Отложенный старт: команда Play/AddFile пришла под вытеснением
+                // и не стала открывать декодер. Делаем это сейчас.
+                AE_LOGI("switch->Player: deferred start (queue=%lu)",
+                        (unsigned long)queueCount_);
+                startNextTrack_();
+            }
+        }
     }
 }
 
@@ -527,14 +595,15 @@ void AudioMgr::startNextTrack_() {
     currentOutput_ = entry.output;
     currentTrackId_ = entry.trackId;
 
-    /* Обновляем громкость из настроек для нового выхода */
+    /* Обновляем громкость из SettingsReader для нового выхода */
 #ifdef HAS_SETTINGS
     {
         uint8_t vol = 7;
-        if (entry.output == Output::FrontSpeaker)
-            vol = Settings.misc.volume_front;
-        else if (entry.output == Output::RearLineout)
-            vol = Settings.misc.volume_linout_opo;
+        if (setread::SettingsReader::instance().isReady()) {
+            const auto &v = setread::SettingsReader::instance().data().volume;
+            if (entry.output == Output::FrontSpeaker)      vol = v.front      & 0x0F;
+            else if (entry.output == Output::RearLineout)  vol = v.linout_opo & 0x0F;
+        }
 		vol									= std::min<uint8_t>(vol, 10);
 		sources_[(int)SrcId::Player].volume = vol;
     }
@@ -547,7 +616,27 @@ void AudioMgr::startNextTrack_() {
         std::memcpy((char*)status_.filename, nm.data(), len);
         ((char*)status_.filename)[len] = '\0';
     }
-    AE_LOGI("playing: %s (dur=%lu sec)", entry.path, (unsigned long)decoder_->duration());
+    AE_LOGI("playing: %s (dur=%lu sec, out=%s)", entry.path,
+            (unsigned long)decoder_->duration(),
+            (entry.output == Output::FrontSpeaker) ? "Front" : "Rear");
+
+    /* Переключаем GPIO-пин ЦАП если выход изменился между треками */
+    if (currentSrc_ == SrcId::Player && sources_[(int)SrcId::Player].active) {
+        Output prevOut = AudioHw::instance().isStarted()
+            ? sources_[(int)SrcId::Player].output  /* уже обновлён выше */
+            : entry.output;
+        (void)prevOut;
+        AudioHw::instance().setOutput(entry.output);
+        /* Управление усилителем при смене выхода между треками */
+        if (entry.output == Output::FrontSpeaker) {
+            AudioHw::instance().ampEnable(true);
+        } else {
+            AudioHw::instance().ampEnable(false);
+        }
+        AE_LOGI("track output: DAC -> %s, amp %s",
+                (entry.output == Output::FrontSpeaker) ? "Front" : "Rear",
+                (entry.output == Output::FrontSpeaker) ? "ON" : "OFF");
+    }
     notifyRearOutput_(entry.output == Output::RearLineout);
 }
 
@@ -679,7 +768,7 @@ void AudioMgr::updateStatus_() {
         dst.path[PLAYER_PATH_MAX - 1] = '\0';
         dst.positionSec = src.startSec;
         dst.durationSec = 0;  // продолжительность неизвестна для элементов в очереди
-        dst.output = (uint8_t)src.output;
+        dst.output = static_cast<PlayerOutput>((uint8_t)src.output);
         n++;
     }
     queueSnapshotCount_ = n;
@@ -697,6 +786,7 @@ uint8_t AudioMgr::getQueueSnapshot(PlayerQueueEntry* out, uint8_t maxEntries) co
 void AudioMgr::taskEntry_(void* arg) { static_cast<AudioMgr*>(arg)->taskLoop_(); }
 
 void AudioMgr::taskLoop_() {
+    Waitfor(SysState.RecFlasherExited);
     for (;;) {
         processCommands_();
 
@@ -714,23 +804,23 @@ void AudioMgr::taskLoop_() {
             }
 
             /* Диагностика пайплайна — раз в 2 секунды */
-            if ((now - lastPipeStatsLog_) >= pdMS_TO_TICKS(2000)) {
-                lastPipeStatsLog_ = now;
-                auto& s = pipeStats_;
-                AE_LOGI("pipe: loop=%lu dec=%lu res=%lu trunc=%lu tout=%lu "
-                        "wait=%lums maxW=%lums in=%lu out=%lu free=%lu",
-                        (unsigned long)s.loopIter,
-                        (unsigned long)s.decodes,
-                        (unsigned long)s.residuals,
-                        (unsigned long)s.truncations,
-                        (unsigned long)s.timeouts,
-                        (unsigned long)s.waitTicks,
-                        (unsigned long)s.maxWait,
-                        (unsigned long)s.samplesIn,
-                        (unsigned long)s.samplesOut,
-                        (unsigned long)AudioHw::instance().freeSpace());
-                s = {};  // сброс
-            }
+            // if ((now - lastPipeStatsLog_) >= pdMS_TO_TICKS(2000)) {
+            //     lastPipeStatsLog_ = now;
+            //     auto& s = pipeStats_;
+            //     AE_LOGI("pipe: loop=%lu dec=%lu res=%lu trunc=%lu tout=%lu "
+            //             "wait=%lums maxW=%lums in=%lu out=%lu free=%lu",
+            //             (unsigned long)s.loopIter,
+            //             (unsigned long)s.decodes,
+            //             (unsigned long)s.residuals,
+            //             (unsigned long)s.truncations,
+            //             (unsigned long)s.timeouts,
+            //             (unsigned long)s.waitTicks,
+            //             (unsigned long)s.maxWait,
+            //             (unsigned long)s.samplesIn,
+            //             (unsigned long)s.samplesOut,
+            //             (unsigned long)AudioHw::instance().freeSpace());
+            //     s = {};  // сброс
+            // }
         }
 
         if (currentSrc_ == SrcId::Disabled) {
@@ -752,6 +842,7 @@ void AudioMgr::setRearOutputCb(RearOutputCb cb) {
 void AudioMgr::notifyRearOutput_(bool active) {
     if (active == rearOutputActive_) return;
     rearOutputActive_ = active;
+    AE_LOGI("rear output notify: %s", active ? "ACTIVE" : "INACTIVE");
     if (rearOutputCb_) rearOutputCb_(active);
 }
 

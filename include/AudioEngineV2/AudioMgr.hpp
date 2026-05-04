@@ -41,7 +41,7 @@ public:
     void seek(uint32_t sec);
     void forward(uint32_t sec = 10);
     void rewind(uint32_t sec = 10);
-    void requestActivate(SrcId id);
+    void requestActivate(SrcId id, Output out = Output::FrontSpeaker);
     void requestDeactivate(SrcId id);
     void setVolume(SrcId id, uint8_t vol);
     void setSampleRate(uint32_t rate);
@@ -86,7 +86,7 @@ public:
         Type type;
         union {
             struct { char path[128]; uint32_t startSec; uint8_t output; } file;
-            struct { uint8_t srcId; } source;
+            struct { uint8_t srcId; uint8_t output; } source;
             struct { uint8_t srcId; uint8_t vol; } volume;
             struct { uint32_t sec; } seek;
             struct { uint32_t rate; } sampleRate;
@@ -188,6 +188,15 @@ private:
     void switchSource_(SrcId newId);
     void startNextTrack_();
     void pipelineTick_();
+
+    /// True, если в данный момент DAC занят не-Player источником
+    /// (роутер вытеснил плеер по приоритету, например AdcDirect).
+    /// В этом состоянии команды плеера должны откладывать побочные
+    /// эффекты (открытие декодера, переход playerState_ в Playing) —
+    /// switchSource_ выполнит их сам, когда источник вернётся.
+    [[nodiscard]] bool isPlayerPreempted_() const noexcept {
+        return currentSrc_ != SrcId::Disabled && currentSrc_ != SrcId::Player;
+    }
 
     /* ── Статус ── */
     volatile PlayerStatus status_{};
